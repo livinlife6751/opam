@@ -11,6 +11,9 @@ OPAM_COLD=${OPAM_COLD:-0}
 OPAM_TEST=${OPAM_TEST:-0}
 OPAM_UPGRADE=${OPAM_UPGRADE:-0}
 
+OPAM12CACHE=`eval echo $OPAM12CACHE`
+OPAMBSROOT=`eval echo $OPAMBSROOT`
+
 OPAMBSSWITCH=opam-build
 
 case $GITHUB_EVENT_NAME in
@@ -31,14 +34,14 @@ git config --global gc.autoDetach false
 
 # used only for TEST jobs
 init-bootstrap () {
-  if [ "$OPAM_TEST" = "1" ]; then
+  if [ "$OPAM_TEST" = "1" ] || [ -n "$SOLVER" ]; then
     set -e
     export OPAMROOT=$OPAMBSROOT
     # The system compiler will be picked up
     opam init --yes --no-setup git+https://github.com/ocaml/opam-repository#$OPAM_REPO_SHA
     eval $(opam env)
 #    opam update
-    CURRENT_SWITCH=$(opam config var switch)
+    CURRENT_SWITCH=$(opam var switch)
     if [[ $CURRENT_SWITCH != "default" ]] ; then
       opam switch default
       eval $(opam env)

@@ -75,6 +75,7 @@ type t = {
   no_auto_upgrade: bool;
   assume_depexts: bool;
   cli: OpamCLIVersion.t;
+  scrubbed_environment_variables: string list;
 }
 
 let default = {
@@ -96,6 +97,7 @@ let default = {
   no_auto_upgrade = false;
   assume_depexts = false;
   cli = OpamCLIVersion.current;
+  scrubbed_environment_variables = [];
 }
 
 type 'a options_fun =
@@ -117,6 +119,7 @@ type 'a options_fun =
   ?no_auto_upgrade:bool ->
   ?assume_depexts:bool ->
   ?cli:OpamCLIVersion.t ->
+  ?scrubbed_environment_variables:string list ->
   'a
 
 let setk k t
@@ -138,6 +141,7 @@ let setk k t
     ?no_auto_upgrade
     ?assume_depexts
     ?cli
+    ?scrubbed_environment_variables
   =
   let (+) x opt = match opt with Some x -> x | None -> x in
   k {
@@ -159,6 +163,7 @@ let setk k t
     no_auto_upgrade = t.no_auto_upgrade + no_auto_upgrade;
     assume_depexts = t.assume_depexts + assume_depexts;
     cli = t.cli + cli;
+    scrubbed_environment_variables = t.scrubbed_environment_variables + scrubbed_environment_variables
   }
 
 let set t = setk (fun x () -> x) t
@@ -192,6 +197,7 @@ let initk k =
     ?no_auto_upgrade:(E.noautoupgrade ())
     ?assume_depexts:(E.assumedepexts ())
     ?cli:None
+    ?scrubbed_environment_variables:None
 
 let init ?noop:_ = initk (fun () -> ())
 
@@ -209,7 +215,7 @@ let opam_init ?root_dir ?strict ?solver =
   (* the init for OpamFormat is done in advance since (a) it has an effect on
      loading the global config (b) the global config has no effect on it *)
   OpamFormatConfig.initk ?strict @@ fun ?log_dir ->
-  let config = OpamStateConfig.load_defaults root in
+  let config = OpamStateConfig.load_defaults ~lock_kind:`Lock_read root in
   let initialised = config <> None in
   (* !X fixme: don't drop the loaded config file to reload it afterwards (when
      loading the global_state) like that... *)

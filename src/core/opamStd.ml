@@ -659,6 +659,16 @@ module OpamString = struct
     in
     aux 0
 
+  let is_prefix_of ~from ~full s =
+    let length_s = String.length s in
+    let length_full = String.length full in
+    if from < 0 || from > length_full then
+      invalid_arg "is_prefix_of"
+    else
+      length_s <= length_full
+      && length_s > from
+      && String.sub full 0 length_s = s
+
 end
 
 type warning_printer =
@@ -1309,7 +1319,7 @@ module OpamFormat = struct
     | []    -> ""
     | [a]   -> a
     | [a;b] -> Printf.sprintf "%s %s %s" a last b
-    | h::t  -> Printf.sprintf "%s, %s" h (pretty_list t)
+    | h::t  -> Printf.sprintf "%s, %s" h (pretty_list ~last t)
 
   let as_aligned_table ?(width=OpamSys.terminal_columns ()) l =
     let itlen =
@@ -1402,6 +1412,7 @@ module Config = struct
 
   type when_ = [ `Always | `Never | `Auto ]
   type when_ext = [ `Extended | when_ ]
+  type answer = [ `unsafe_yes | `all_yes | `all_no | `ask ]
 
   let env conv var =
     try Option.map conv (Env.getopt ("OPAM"^var))
@@ -1417,11 +1428,12 @@ module Config = struct
     | "1" | "yes" | "true" -> Some true
     | _ -> None
 
-  let env_bool var =
-    env (fun s -> match bool_of_string s with
-        | Some s -> s
-        | None -> failwith "env_bool")
-      var
+  let bool s =
+    match bool_of_string s with
+    | Some s -> s
+    | None -> failwith "env_bool"
+
+  let env_bool var = env bool var
 
   let env_int var = env int_of_string var
 
@@ -1478,6 +1490,20 @@ module Config = struct
     | `Always -> true
     | `Never -> false
     | `Auto -> Lazy.force auto
+
+  let answer s =
+    match String.lowercase_ascii s with
+    | "ask" -> `ask
+    | "yes" -> `all_yes
+    | "no" -> `all_no
+    | "unsafe-yes" -> `unsafe_yes
+    | _ -> failwith "env_answer"
+
+  let env_answer =
+    env (fun s ->
+        try if bool s then `all_yes else `all_no
+        with Failure _ -> answer s)
+
 
   module E = struct
     type t = ..

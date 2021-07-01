@@ -33,13 +33,23 @@ MD5_dose3 = e7d4b1840383c6732f29a47c08ba5650
 
 $(call PKG_SAME,dose3)
 
-URL_mccs = https://github.com/AltGr/ocaml-mccs/archive/1.1+12.tar.gz
-MD5_mccs = 7086eefb41e631a63e26b23577cef582
+URL_mccs = https://github.com/AltGr/ocaml-mccs/archive/1.1+13.tar.gz
+MD5_mccs = 13504d3b5dcbf0bdc6d95a62de20af4a
 
 $(call PKG_SAME,mccs)
 
-URL_opam-file-format = https://github.com/ocaml/opam-file-format/archive/2.1.2.tar.gz
-MD5_opam-file-format = f16ed774167fc1881876b8185087e0ab
+URL_opam-0install-cudf = https://github.com/ocaml-opam/opam-0install-solver/releases/download/v0.4.1/opam-0install-cudf-v0.4.1.tbz
+MD5_opam-0install-cudf = 44e6d5a7fcdbc130db5dc86a6b9aeca6
+
+$(call PKG_SAME,opam-0install-cudf)
+
+URL_0install-solver = https://github.com/0install/0install/releases/download/v2.17/0install-v2.17.tbz
+MD5_0install-solver = 50daf035b04b29399a3c6e6f965ac447
+
+$(call PKG_SAME,0install-solver)
+
+URL_opam-file-format = https://github.com/ocaml/opam-file-format/archive/2.1.3.tar.gz
+MD5_opam-file-format = b805562dd2d86fc3c8e6d47884fd1da6
 
 $(call PKG_SAME,opam-file-format)
 

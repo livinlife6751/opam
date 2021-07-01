@@ -267,6 +267,10 @@ module String : sig
   val remove_prefix: prefix:string -> string -> string
   val remove_suffix: suffix:string -> string -> string
 
+  (** [is_prefix_of from full str] returns true if [str] if a prefix of [full],
+      with at least [from] first characters *)
+  val is_prefix_of: from:int -> full:string -> string -> bool
+
   (** {4 Transformations} *)
 
   (** Cut a string at the first occurrence of the given char *)
@@ -545,6 +549,7 @@ module Config : sig
 
   type when_ = [ `Always | `Never | `Auto ]
   type when_ext = [ `Extended | when_ ]
+  type answer = [ `unsafe_yes | `all_yes | `all_no | `ask ]
 
   (* Parse a envrionement variable boolean value *)
   val bool_of_string: string -> bool option
@@ -571,6 +576,8 @@ module Config : sig
   val env_when_ext: env_var -> when_ext option
 
   val resolve_when: auto:(bool Lazy.t) -> when_ -> bool
+
+  val env_answer: env_var -> answer option
 
   module type Sig = sig
 

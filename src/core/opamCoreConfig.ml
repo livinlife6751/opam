@@ -14,6 +14,7 @@ module E = struct
 
   type OpamStd.Config.E.t +=
     | COLOR of OpamStd.Config.when_ option
+    | CONFIRMLEVEL of OpamStd.Config.answer option
     | DEBUG of int option
     | DEBUGSECTIONS of OpamStd.Config.sections option
     | ERRLOGLEN of int option
@@ -32,6 +33,7 @@ module E = struct
 
   open OpamStd.Config.E
   let color = value (function COLOR c -> c | _ -> None)
+  let confirmlevel = value (function CONFIRMLEVEL c -> c | _ -> None)
   let debug = value (function DEBUG i -> i | _ -> None)
   let debugsections = value (function DEBUGSECTIONS s -> s | _ -> None)
   let errloglen = value (function ERRLOGLEN i -> i | _ -> None)
@@ -57,7 +59,8 @@ type t = {
   color: OpamStd.Config.when_;
   utf8: OpamStd.Config.when_ext;
   disp_status_line: OpamStd.Config.when_;
-  answer: bool option;
+  confirm_level: [ OpamStd.Config.answer | `undefined ];
+  yes: bool option;
   safe_mode: bool;
   log_dir: string;
   keep_log_dir: bool;
@@ -75,7 +78,8 @@ type 'a options_fun =
   ?color:OpamStd.Config.when_ ->
   ?utf8:OpamStd.Config.when_ext ->
   ?disp_status_line:OpamStd.Config.when_ ->
-  ?answer:bool option ->
+  ?confirm_level:OpamStd.Config.answer ->
+  ?yes:bool option ->
   ?safe_mode:bool ->
   ?log_dir:string ->
   ?keep_log_dir:bool ->
@@ -92,7 +96,8 @@ let default = {
   color = `Auto;
   utf8 = `Auto;
   disp_status_line = `Auto;
-  answer = None;
+  confirm_level = `undefined;
+  yes = None;
   safe_mode = false;
   log_dir =
     (let user = try Unix.getlogin() with Unix.Unix_error _ -> "xxx" in
@@ -113,7 +118,8 @@ let setk k t
     ?color
     ?utf8
     ?disp_status_line
-    ?answer
+    ?confirm_level
+    ?yes
     ?safe_mode
     ?log_dir
     ?keep_log_dir
@@ -130,7 +136,11 @@ let setk k t
     color = t.color + color;
     utf8 = t.utf8 + utf8;
     disp_status_line = t.disp_status_line + disp_status_line;
-    answer = t.answer + answer;
+    confirm_level =
+      (match confirm_level with
+       | Some (`all_yes|`all_no|`ask|`unsafe_yes as c) -> c
+       | None ->  t.confirm_level);
+    yes = t.yes + yes;
     safe_mode = t.safe_mode + safe_mode;
     log_dir = t.log_dir + log_dir;
     keep_log_dir = t.keep_log_dir + keep_log_dir;
@@ -157,11 +167,11 @@ let initk k =
         | true -> Some `Extended
         | false -> None)
     ) in
-  let answer = match E.yes (), E.no () with
+  let yes =
+    match E.yes (), E.no () with
     | Some true, _ -> Some (Some true)
     | _, Some true -> Some (Some false)
-    | None, None -> None
-    | _ -> Some None
+    | _, _ -> None
   in
   (setk (setk (fun c -> r := c; k)) !r)
     ?debug_level:(E.debug ())
@@ -170,7 +180,8 @@ let initk k =
     ?color:(E.color ())
     ?utf8
     ?disp_status_line:(E.statusline ())
-    ?answer
+    ?confirm_level:(E.confirmlevel ())
+    ?yes
     ?safe_mode:(E.safe ())
     ?log_dir:(E.logs ())
     ?keep_log_dir:(E.keeplogs ())
@@ -180,6 +191,20 @@ let initk k =
     ?precise_tracking:(E.precisetracking ())
 
 let init ?noop:_ = initk (fun () -> ())
+
+let answer () =
+  match !r.confirm_level, !r.yes with
+  | #OpamStd.Config.answer as c, _ -> c
+  | _, Some true -> `all_yes
+  | _, Some false -> `all_no
+  | _ -> `ask
+
+let answer_is =
+  let answer = lazy (answer ()) in
+  fun a -> Lazy.force answer = a
+
+let answer_is_yes () =
+  answer_is `all_yes || answer_is `unsafe_yes
 
 #ifdef DEVELOPER
 let developer = true

@@ -21,6 +21,9 @@ type t = dirname
 (** State cache *)
 val state_cache: t -> filename
 
+(** Directory containing state cache *)
+val state_cache_dir: t -> dirname
+
 (** Global lock file for the whole opamroot. Opam should generally read-lock
     this (e.g. initialisation and format upgrades require a write lock) *)
 val lock: t -> filename
@@ -35,12 +38,6 @@ val init_config_files: unit -> OpamFile.InitConfig.t OpamFile.t list
 (** Lock for updates on the main config file (write lock when changes to
     switches, repositories lists are expected. No lock needed otherwise) *)
 val config_lock: t -> filename
-
-(** Archives dir *)
-val archives_dir: t -> dirname
-
-(** Archive file: {i $opam/archives/$NAME.$VERSION+opam.tar.gz} *)
-val archive: t -> package -> filename
 
 (** Global lock file for the repositories mirrors: {i $opam/repo/lock} *)
 val repos_lock: t -> filename

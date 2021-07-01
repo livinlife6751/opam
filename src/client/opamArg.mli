@@ -134,6 +134,9 @@ val arg_list: string -> string -> 'a Arg.converter -> 'a list Term.t
 (** Generic argument list builder *)
 val nonempty_arg_list: string -> string -> 'a Arg.converter -> 'a list Term.t
 
+(** Confirmation level enum *)
+val confirm_enum: (validity * string * OpamStd.Config.answer) list
+
 (** {3 Global options} *)
 
 (** Type for global options *)
@@ -143,7 +146,8 @@ type global_options = {
   quiet : bool;
   color : OpamStd.Config.when_ option;
   opt_switch : string option;
-  yes : bool;
+  confirm_level : OpamStd.Config.answer option;
+  yes: bool option;
   strict : bool;
   opt_root : dirname option;
   git_version : bool;
@@ -341,5 +345,6 @@ val help_sections: OpamCLIVersion.Sourced.t -> Manpage.block list
 
 (** {2 Environment variables} *)
 
-val preinit_opam_envvariables: unit -> unit
-val init_opam_envvariabes: OpamCLIVersion.Sourced.t -> unit
+val preinit_opam_env_variables: unit -> unit
+val init_opam_env_variabes: OpamCLIVersion.Sourced.t -> unit
+val scrubbed_environment_variables: string list

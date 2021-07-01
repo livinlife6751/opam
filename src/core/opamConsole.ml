@@ -236,41 +236,45 @@ let acolor_w width c f s =
 type win32_color_mode = Shim | VT100 of (unit -> unit)
 
 type _ shim_return =
- | Handle : (OpamStubs.handle * win32_color_mode) shim_return
+ | Handle : (OpamStubs.stdhandle * win32_color_mode) shim_return
  | Mode   : win32_color_mode shim_return
  | Peek   : bool shim_return
 
-let force_win32_vt100 hConsoleOutput () =
-  let mode = OpamStubs.getConsoleMode hConsoleOutput in
-  (* ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4 *)
-  let vt100_on = 0x4 in
-  if mode land vt100_on = 0 then
-    OpamStubs.setConsoleMode hConsoleOutput (mode lor vt100_on) |> ignore
+let force_win32_vt100 handle () =
+  try
+    let hConsoleOutput = OpamStubs.getStdHandle handle in
+    let mode = OpamStubs.getConsoleMode hConsoleOutput in
+    (* ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4 *)
+    let vt100_on = 0x4 in
+    if mode land vt100_on = 0 then
+      OpamStubs.setConsoleMode hConsoleOutput (mode lor vt100_on) |> ignore
+  with Not_found -> ()
 
 let enable_win32_vt100 ch =
-  let hConsoleOutput =
-    OpamStubs.getStdHandle ch
-  in
   try
+    let hConsoleOutput = OpamStubs.getStdHandle ch in
     let mode = OpamStubs.getConsoleMode hConsoleOutput in
     (* ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4 *)
     let vt100_on = 0x4 in
     if mode land vt100_on <> 0 then
-      (hConsoleOutput, VT100(force_win32_vt100 hConsoleOutput))
+      (ch, VT100(force_win32_vt100 ch))
     else
       if OpamStubs.setConsoleMode hConsoleOutput (mode lor vt100_on) then begin
         let restore_console () =
-          let mode =
-            OpamStubs.getConsoleMode hConsoleOutput land (lnot vt100_on)
-          in
-          OpamStubs.setConsoleMode hConsoleOutput mode |> ignore
+          try
+            let hConsoleOutput = OpamStubs.getStdHandle ch in
+            let mode =
+              OpamStubs.getConsoleMode hConsoleOutput land (lnot vt100_on)
+            in
+            OpamStubs.setConsoleMode hConsoleOutput mode |> ignore
+          with Not_found -> ()
         in
         at_exit restore_console;
-        (hConsoleOutput, VT100(force_win32_vt100 hConsoleOutput))
+        (ch, VT100(force_win32_vt100 ch))
       end else
-        (hConsoleOutput, Shim)
+        (ch, Shim)
   with Not_found ->
-    (hConsoleOutput, VT100 ignore)
+    (ch, VT100 ignore)
 
 let stdout_state = lazy (enable_win32_vt100 OpamStubs.STD_OUTPUT_HANDLE)
 let stderr_state = lazy (enable_win32_vt100 OpamStubs.STD_ERROR_HANDLE)
@@ -324,13 +328,14 @@ let win32_print_message ch msg =
   if get_win32_console_shim ch Peek then
     Printf.fprintf ocaml_ch "%s%!" msg
   else
-    let (hConsoleOutput, mode) = get_win32_console_shim ch Handle in
+    let (ch, mode) = get_win32_console_shim ch Handle in
     match mode with
     | VT100 force ->
       force ();
       output_string ocaml_ch msg;
       flush ocaml_ch
     | Shim ->
+      let hConsoleOutput = OpamStubs.getStdHandle ch in
       let {OpamStubs.attributes; _} =
         OpamStubs.getConsoleScreenBufferInfo hConsoleOutput
       in
@@ -428,15 +433,15 @@ let carriage_delete_unix _ =
   print_string "\r\027[K"
 
 let carriage_delete_windows () =
-  let (hConsoleOutput, mode) = get_win32_console_shim `stdout Handle in
-  match mode with
-  | Shim ->
+  match get_win32_console_shim `stdout Handle with
+  | (ch, Shim) ->
+      let hConsoleOutput = OpamStubs.getStdHandle ch in
       let {OpamStubs.size = (w, _); cursorPosition = (_, row); _} =
         OpamStubs.getConsoleScreenBufferInfo hConsoleOutput in
       Printf.printf "\r%!";
       OpamStubs.fillConsoleOutputCharacter hConsoleOutput '\000' w (0, row)
         |> ignore
-  | VT100 force ->
+  | (_, VT100 force) ->
       force ();
       carriage_delete_unix ()
 
@@ -695,16 +700,17 @@ let header_error fmt =
     ) fmt
 
 
-let confirm ?(default=true) fmt =
+let confirm ?(require_unsafe_yes=false) ?(default=true) fmt =
   Printf.ksprintf (fun s ->
       try
         if OpamCoreConfig.(!r.safe_mode) then false else
         let prompt () =
           formatted_msg "%s [%s] " s (if default then "Y/n" else "y/N")
         in
-        if OpamCoreConfig.(!r.answer) = Some true then
+        if (require_unsafe_yes && OpamCoreConfig.answer_is `unsafe_yes)
+        || (not require_unsafe_yes && OpamCoreConfig.answer_is_yes ()) then
           (prompt (); msg "y\n"; true)
-        else if OpamCoreConfig.(!r.answer) = Some false ||
+        else if OpamCoreConfig.answer_is `all_no ||
                 OpamStd.Sys.(not tty_in)
         then
           (prompt (); msg "n\n"; false)
@@ -758,7 +764,7 @@ let confirm ?(default=true) fmt =
 let read fmt =
   Printf.ksprintf (fun s ->
       formatted_msg "%s " s;
-      if OpamCoreConfig.(!r.answer = None && not !r.safe_mode) then (
+      if OpamCoreConfig.(answer_is `ask && not !r.safe_mode) then (
         try match read_line () with
           | "" -> None
           | s  -> Some s

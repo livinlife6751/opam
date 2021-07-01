@@ -1,5 +1,5 @@
 opam-version: "2.0"
-version: "2.1.0~beta4"
+version: "2.2.0~alpha~dev"
 synopsis: "Bootstrapped development binary for opam 2.1"
 description: """
 This package compiles (bootstraps) opam. For consistency and safety of the installation, the binaries are not installed into the PATH, but into lib/opam-devel, from where the user can manually install them system-wide.
@@ -20,10 +20,10 @@ authors: [
 homepage: "https://opam.ocaml.org"
 bug-reports: "https://github.com/ocaml/opam/issues"
 dev-repo: "git+https://github.com/ocaml/opam.git"
+license: "LGPL-2.1-only WITH OCaml-LGPL-linking-exception"
 build: [
   ["./configure" "--disable-checks" "--prefix" prefix]
   [make "%{name}%.install"]
-  [make "tests"] {with-test}
 ]
 depends: [
   "ocaml" {>= "4.02.3"}

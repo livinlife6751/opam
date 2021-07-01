@@ -773,11 +773,14 @@ let update_with_init_config ?(overwrite=false) config init_config =
 
 let reinit ?(init_config=OpamInitDefaults.init_config()) ~interactive
     ?dot_profile ?update_config ?env_hook ?completion ?inplace
-    ?(check_sandbox=true)
+    ?(check_sandbox=true) ?(bypass_checks=false)
     config shell =
   let root = OpamStateConfig.(!r.root_dir) in
   let config = update_with_init_config config init_config in
-  let _all_ok = init_checks ~hard_fail_exn:false init_config in
+  let _all_ok =
+    if bypass_checks then false else
+      init_checks ~hard_fail_exn:false init_config
+  in
   let custom_init_scripts =
     let env v =
       let vs = OpamVariable.Full.variable v in
@@ -843,7 +846,9 @@ let init
           | None -> OpamFile.InitConfig.repositories init_config
         in
         let config =
-          update_with_init_config OpamFile.Config.empty init_config |>
+          update_with_init_config
+            OpamFile.Config.(with_opam_root_version root_version empty)
+            init_config |>
           OpamFile.Config.with_repositories (List.map fst repos)
         in
 
@@ -902,7 +907,9 @@ let init
               (OpamFile.InitConfig.default_compiler init_config)
           in
           let invariant = OpamFile.InitConfig.default_invariant init_config in
-          let virt_st = OpamSwitchState.load_virtual gt rt in
+          let virt_st =
+            OpamSwitchState.load_virtual ~avail_default:false gt rt
+          in
           let univ =
             OpamSwitchState.universe virt_st
               ~requested:OpamPackage.Name.Set.empty Query
@@ -1240,9 +1247,32 @@ let install_t t ?ask ?(ignore_conflicts=false) ?(depext_only=false)
     | Conflicts cs ->
       log "conflict!";
       OpamConsole.error "Package conflict!";
-      OpamConsole.errmsg "%s"
-        (OpamCudf.string_of_conflicts t.packages
-           (OpamSwitchState.unavailable_reason t) cs);
+      let (conflicts, _cycles) as explanations =
+        OpamCudf.conflict_explanations_raw t.packages cs
+      in
+      let has_missing_depexts =
+        let check = function
+          | `Missing (_, _, fdeps) ->
+            OpamFormula.fold_right (fun a x ->
+                match OpamSwitchState.unavailable_reason_raw t x with
+                | `MissingDepexts _ -> true
+                | _ -> a)
+              false fdeps
+          | _ -> false
+        in
+        List.exists check conflicts
+      in
+      let extra_message =
+        if has_missing_depexts then
+          OpamStd.Option.map_default (fun s -> s ^ ".\n\n") ""
+            (OpamSysInteract.repo_enablers ())
+        else
+          ""
+      in
+      OpamConsole.errmsg "%s%s"
+        (OpamCudf.string_of_explanations
+           (OpamSwitchState.unavailable_reason t) explanations)
+        extra_message;
       t, if depext_only then None else Some (Conflicts cs)
     | Success full_solution ->
       let solution =

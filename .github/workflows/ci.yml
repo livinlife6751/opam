@@ -3,16 +3,17 @@ name: Builds, tests & co
 on: [ push, pull_request ]
 
 env:
-  OPAMBSVERSION: 2.1.0-alpha2
+  OPAMBSVERSION: 2.1.0-beta4
   OPAMBSROOT: ~/.cache/.opam.cached
   OPAM12CACHE: ~/.cache/opam1.2/cache
   # This should be identical to the value in appveyor.yml
-  OPAM_TEST_REPO_SHA: 75ff83837547183f000e1c18d42260d7d6cc5fbc
-  OPAM_REPO_SHA: 75ff83837547183f000e1c18d42260d7d6cc5fbc
+  OPAM_TEST_REPO_SHA: b02110b549a0b5275806ce27444fabac71093a0e
+  OPAM_REPO_SHA: b02110b549a0b5275806ce27444fabac71093a0e
   # Default ocaml version for some jobs
   OCAML_VERSION: 4.11.2
   ## variables for cache paths
   GH_OCAML_CACHE: ~/.cache/ocaml-local/**
+  SOLVER:
 
 defaults:
   run:
@@ -154,6 +155,9 @@ jobs:
         OCAML_VERSION: ${{ matrix.ocamlv }}
       run: bash -exu .github/scripts/main.sh
 
+####
+# Opam cold
+####
   cold:
     needs: [ build, archives-cache ]
     runs-on: ${{ matrix.os }}
@@ -182,6 +186,59 @@ jobs:
         make lib-pkg
         bash -exu .github/scripts/main.sh
 
+####
+# Compile solver backends
+####
+  solvers:
+    needs: [ build ]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+        ocamlv: [ 4.11.2 ]
+        solver: [ z3, 0install ]
+      fail-fast: false
+    env:
+      SOLVER: ${{ matrix.solver }}
+      OPAM_REPO_SHA: 02ead5a557
+      OPAMBSROOT: ~/.cache/opam.${{ matrix.solver }}.cached
+    steps:
+    - uses: actions/checkout@v2
+    - name: install deps
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: sudo apt install bubblewrap
+    - name: ocaml ${{ matrix.ocamlv }} cache - test
+      id: ocaml-cache-test
+      uses: actions/cache@v2
+      with:
+        path: ${{ env.GH_OCAML_CACHE }}
+        key: ${{ runner.os }}-ocaml-${{ matrix.ocamlv }}-${{ matrix.solver }}-${{ hashFiles ('.github/scripts/ocaml-cache.sh', '.github/scripts/preamble.sh') }}-test
+    - name: Building ocaml ${{ env.OCAML_VERSION }} cache - test
+      if: steps.ocaml-cache-test.outputs.cache-hit != 'true'
+      env:
+        OCAML_VERSION: ${{ matrix.ocamlv }}
+      run: bash -exu .github/scripts/ocaml-cache.sh ocaml
+    - name: opam bootstrap cache
+      id: opam-bootstrap
+      uses: actions/cache@v2
+      with:
+        path: |
+          ~/.cache/opam.${{ matrix.solver }}.cached
+          ~/.cache/opam-local/bin/**
+        key: opam-${{ matrix.solver }}-${{ runner.os }}-${{ env.OPAMBSVERSION }}-${{ matrix.ocamlv }}-${{ hashFiles ('.github/scripts/opam-bs-cache.sh', '.github/scripts/preamble.sh') }}
+    - name: opam root cache
+      env:
+        OPAMBSROOT: ~/.cache/opam.${{ matrix.solver }}.cached
+      if: steps.opam-bootstrap.outputs.cache-hit != 'true'
+      run: bash -exu .github/scripts/opam-bs-cache.sh
+    - name: Compile
+      env:
+        OCAML_VERSION: ${{ matrix.ocamlv }}
+      run: bash -exu .github/scripts/solvers.sh
+
+####
+# Upgrade from 1.2 to current
+####
   upgrade:
     needs: [ build ]
     runs-on: ${{ matrix.os }}
