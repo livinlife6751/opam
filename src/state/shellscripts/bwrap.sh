@@ -2,10 +2,13 @@
 
 set -ue
 
+# Used to make /* match all files (even those beginning with a '.')
+shopt -s dotglob
+
 if ! command -v bwrap >/dev/null; then
     echo "The 'bwrap' command was not found. Install 'bubblewrap' on your system, or" >&2
     echo "disable sandboxing in ${OPAMROOT:-~/.opam}/config at your own risk." >&2
-    echo "See https://github.com/projectatomic/bubblewrap for bwrap details." >&2
+    echo "See https://github.com/containers/bubblewrap for bwrap details." >&2
     echo "For 'bwrap' use in opam, see the FAQ:" >&2
     echo "  https://opam.ocaml.org/doc/FAQ.html#Why-does-opam-require-bwrap" >&2
     exit 10
@@ -16,24 +19,26 @@ fi
 ARGS=(--unshare-net --new-session --die-with-parent)
 ARGS=("${ARGS[@]}" --proc /proc --dev /dev)
 ARGS=("${ARGS[@]}" --setenv TMPDIR /opam-tmp --setenv TMP /opam-tmp --setenv TEMPDIR /opam-tmp --setenv TEMP /opam-tmp)
+ARGS=("${ARGS[@]}" --bind /tmp /tmp)
 ARGS=("${ARGS[@]}" --tmpfs /opam-tmp)
 ARGS=("${ARGS[@]}" --tmpfs /run)
+# NOTE: When adding a new mount-point please sync with the loop below to avoid overriding the mount point
 
 add_mount() {
-    case "$1" in
-        ro) B="--ro-bind";;
-        rw) B="--bind";;
-        sym) B="--symlink";;
-    esac
-    ARGS=("${ARGS[@]}" "$B" "$2" "$3")
+    if [ -d "$dir" ]; then
+      case "$1" in
+          ro) B="--ro-bind";;
+          rw) B="--bind";;
+          sym) B="--symlink";;
+      esac
+      ARGS=("${ARGS[@]}" "$B" "$2" "$3")
+    fi
 }
 
 add_mounts() {
     local flag="$1"; shift
     for dir in "$@"; do
-      if [ -d "$dir" ]; then
-        add_mount "$flag" "$dir" "$dir"
-      fi
+      add_mount "$flag" "$dir" "$dir"
     done
 }
 
@@ -53,11 +58,27 @@ add_sys_mounts() {
     done
 }
 
-# remove some unusual paths (/nix/stored and /rw/usrlocal )
-# use OPAM_USER_PATH_RO variable to add them
-# the OPAM_USER_PATH_RO format is the same as PATH
-# ie: export OPAM_USER_PATH_RO=/nix/store:/rw/usrlocal
-add_sys_mounts /usr /bin /lib /lib32 /lib64 /etc /opt /home /var /tmp
+# NOTE: The list of moint-points to avoid is always to be sync'd with the list at the top of the file
+# It is due to a limitation of bubblewrap that we have to mount the directories one by one
+# See https://github.com/containers/bubblewrap/issues/413
+for dir in /*; do
+    case "$dir" in
+    "/proc" | "/dev" | "/run" | "/tmp" | "/opam-tmp") ;;
+    "/sys") ;; # Disabled without a corresponding bind, due to security concerns
+    *) add_sys_mounts "$dir";;
+    esac
+done
+# NOTE: This is required for NixOS (see https://github.com/NixOS/nixpkgs/pull/363770)
+if [ -d /run/current-system/sw ]; then
+  add_sys_mounts /run/current-system/sw
+fi
+
+mount_linked_cache() {
+  local l_cache=$1
+  local cache=$(readlink -m "$l_cache")
+  mkdir -p "$cache"
+  add_mount rw "$l_cache" "$cache"
+}
 
 # C compilers using `ccache` will write to a shared cache directory
 # that remain writeable. ccache seems widespread in some Fedora systems.
@@ -73,23 +94,19 @@ add_ccache_mount() {
       done
       CCACHE_DIR=${CCACHE_DIR-$HOME/.ccache}
       ccache_dir=${ccache_dir-$CCACHE_DIR}
-      add_mounts rw "$ccache_dir"
+      mount_linked_cache "$ccache_dir"
   fi
 }
 
 add_dune_cache_mount() {
-  local u_cache=${XDG_CACHE_HOME:-$HOME/.cache}
-  local u_dune_cache=$u_cache/dune
-  local cache=$(readlink -m "$u_cache")
-  local dune_cache=$cache/dune
-  local dune_cache=$(readlink -m "$u_dune_cache")
-  mkdir -p "${dune_cache}"
-  add_mount rw "$u_dune_cache" "$dune_cache"
+  local dune_cache=${DUNE_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/dune}
+  mount_linked_cache "$dune_cache"
 }
 
-# mount unusual path in ro
-if  [ -n "${OPAM_USER_PATH_RO-}" ]; then
-   add_mounts ro $(echo "${OPAM_USER_PATH_RO}" | sed 's|:| |g')
+# In case OPAMROOT happens to be in one of the writeable directories we
+# need to make sure it is read-only
+if [ -n "${OPAMROOT:-}" ]; then
+  add_mounts ro "$OPAMROOT"
 fi
 
 # When using opam variable that must be defined at action time, add them also
@@ -121,6 +138,11 @@ case "$COMMAND" in
         exit 2
 esac
 
-# Note: we assume $1 can be trusted, see https://github.com/projectatomic/bubblewrap/issues/259
+if ! command -v "$1" >/dev/null; then
+    echo "[ERROR] Command not found: $1" >&2
+    exit 10
+fi
+
+# Note: we assume $1 can be trusted, see https://github.com/containers/bubblewrap/issues/259
 # As of now we are compatible up to 0.1.8, '--' can be added here when we require >= 0.3.0
 exec bwrap "${ARGS[@]}" "$@"

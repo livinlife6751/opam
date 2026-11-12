@@ -20,7 +20,7 @@ val getpid : unit -> int
       faked process ID returned by the Microsoft C Runtime
       (see https://caml.inria.fr/mantis/view.php?id=4034).
 
-      On all other platforms, this is just an alias for [Unix.getpid]. *)
+      On all other platforms, this is just an alias for {!Unix.getpid}. *)
 
 val getCurrentProcessID : unit -> int32
   (** Windows only. As {!getpid}, but without the possibility of truncating the
@@ -55,21 +55,33 @@ val getWindowsVersion : unit -> int * int * int * int
       [(major, minor, build, revision)]. This function only works if opam is
       compiled OCaml 4.06.0 or later, it returns [(0, 0, 0, 0)] otherwise. *)
 
-val isWoW64 : unit -> bool
-  (** Returns [false] unless this process is a 32-bit Windows process running
-      in the WoW64 sub-system (i.e. is being run on 64-bit Windows). *)
+val getArchitecture : unit -> windows_cpu_architecture
+  (** Windows only. Equivalent of [uname -m]. *)
 
 val waitpids : int list -> int -> int * Unix.process_status
   (** Windows only. Given a list [pids] with [length] elements,
       [waitpids pids length] behaves like [Unix.wait], returning the pid and
       exit status of the first process to terminate. *)
 
+val readRegistry : registry_root -> string -> string -> 'a registry_value -> 'a option
+  (** Windows only. [readRegistry root key name value_type] reads the value
+      [name] from registry key [key] of [root]. As per Windows Registry
+      convention, the default value can be read by passing [""] for [name].
+
+      @raise Failure If the value in the registry does not have [value_type] *)
+
+val enumRegistry : registry_root -> string -> 'a registry_value -> (string * 'a) list
+  (** Windows only. [enumRegistry root key value_type] reads all the values
+      from registry key [key] of [root] which have type [value_type].
+
+      Returns [[]] if the key is not found. *)
+
 val writeRegistry :
   registry_root -> string -> string -> 'a registry_value -> 'a -> unit
   (** Windows only. [writeRegistry root key name value_type value] sets the
       value [name] of type [value_type] in registry key [key] of [root] to
       [value].
- 
+
       @raise Failure If the value could not be set.
       @raise Not_found If [key] does not exist. *)
 
@@ -89,26 +101,27 @@ val delete_glyph_checker : handle * handle -> unit
 (** Windows only. Given [(dc, font)], deletes the font object and releases the
     DC. *)
 
-val has_glyph : handle * handle -> OpamCompat.Uchar.t -> bool
+val has_glyph : handle * handle -> Uchar.t -> bool
 (** Windows only. [has_glyph (dc, font) scalar] returns [true] if [font]
     contains a glyph for [scalar].
 
     @raise Failure If the call to [GetGlyphIndicesW] fails. *)
 
-val isWoW64Process : int32 -> bool
-(** Windows only. General version of {!isWoW64} for any given process ID. See
-    https://msdn.microsoft.com/en-us/library/windows/desktop/ms684139.aspx *)
+val getProcessArchitecture : int32 option -> windows_cpu_architecture
+(** Windows only. Returns the CPU architecture of the given process ID (or the
+    current process). *)
 
 val process_putenv : int32 -> string -> string -> bool
 (** Windows only. [process_putenv pid name value] sets the environment variable
-    [name] to [value] in given process ID ([Unix.putenv] must also be called to
+    [name] to [value] in given process ID ({!Unix.putenv} must also be called to
     update the value in the current process). This function must not be called
     if the target process is 32-bit and the current process is 64-bit or vice
     versa (outcomes vary from a no-op to a segfault). *)
 
-val shGetFolderPath : int -> shGFP_type -> string
-(** Windows only. [shGetFolderPath nFolder dwFlags] retrieves the location of a special
-    folder by CSIDL value. See https://msdn.microsoft.com/en-us/library/windows/desktop/bb762181.aspx *)
+val getPathToHome : unit -> string
+val getPathToSystem : unit -> string
+val getPathToLocalAppData : unit -> string
+(** Windows only. retrieves the location of the wanted directory *)
 
 val sendMessageTimeout :
   nativeint -> int -> int -> ('a, 'b, 'c) winmessage -> 'a -> 'b -> int * 'c
@@ -118,11 +131,11 @@ val sendMessageTimeout :
     return value from SendMessageTimeout, [snd] depends on both the message and
     [fst]. See https://msdn.microsoft.com/en-us/library/windows/desktop/ms644952.aspx *)
 
-val getParentProcessID : int32 -> int32
-(** Windows only. [getParentProcessID pid] returns the process ID of the parent
-    of [pid].
-
-    @raise Failure If walking the process tree fails to find the process. *)
+val getProcessAncestry : unit -> (int32 * string) list
+(** Windows only. Returns the pid and full path to the image for each entry in
+    the ancestry list for this process, starting with the process itself. If an
+    image name can't be determined, then [""] is returned; on failure, returns
+    [[]]. *)
 
 val getConsoleAlias : string -> string -> string
 (** Windows only. [getConsoleAlias alias exeName] retrieves the value for a
@@ -132,3 +145,40 @@ val getConsoleAlias : string -> string -> string
 val win_create_process : string -> string -> string option -> Unix.file_descr ->
                          Unix.file_descr -> Unix.file_descr -> int
 (** Windows only. Provided by OCaml's win32unix library. *)
+
+val getConsoleWindowClass : unit -> string option
+(** Windows only. Returns the name of the class for the Console window or [None]
+    if there is no console. *)
+
+val setErrorMode : int -> int
+(** Windows only. Directly wraps SetErrorMode. *)
+
+val getErrorMode : unit -> int
+(** Windows only. Directly wraps GetErrorMode. *)
+
+val setConsoleToUTF8 : unit -> unit
+(** Windows only. Directly wraps SetConsoleOutputCP(CP_UTF8). *)
+
+val getVersionInfo : string -> win32_version_info option
+(** Windows only. Returns the version info block for a file or [None] if the
+    file either doesn't exist or doesn't have one. *)
+
+val get_initial_environment : unit -> string list
+(** Windows only. Returns the environment which new processes would receive. *)
+
+val get_stdout_ws_col : unit -> int
+(** Unix only. Returns the number of columns of the current terminal window
+    linked with stdout. If stdout isn't linked to any terminal
+    (e.g. redirection), then this function will return 0. A valid number
+    of columns should be strictly above 0. *)
+
+type uname = {
+  sysname : string; (** uname -s *)
+  release : string; (** uname -r *)
+  machine : string; (** uname -m *)
+}
+(** A subset of the [struct utsname] C structure, as modified by uname(2),
+    converted to OCaml datatypes. *)
+
+val uname : unit -> uname
+(** Unix only. Returns info from uname(2) *)

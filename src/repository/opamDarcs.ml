@@ -48,7 +48,7 @@ module VCS = struct
   (* Marks the current state, in the form of a reversing patch on top of the
      fetched state *)
 
-  let fetch ?cache_dir:_ ?subpath:_ repo_root repo_url =
+  let fetch ?full_fetch:_ ?cache_dir:_ ?subpath:_ repo_root repo_url =
     (* Just do a fresh pull into a temp directory, and replace _darcs/
        There is no easy way to diff or make sure darcs forgets about local
        patches otherwise. *)
@@ -81,10 +81,14 @@ module VCS = struct
     OpamSystem.raise_on_process_error r;
     Done ()
 
-  let reset_tree repo_root _repo_url =
+  let clean repo_root =
     darcs repo_root [ "obliterate"; "--all"; "-t"; opam_local_tag ]
     @@> fun r ->
     OpamSystem.raise_on_process_error r;
+    Done ()
+
+  let reset_tree repo_root _repo_url =
+    clean repo_root @@+ fun () ->
     darcs repo_root [ "obliterate"; "--all"; "-p"; opam_reverse_commit ]
     @@> fun r ->
     (* returns 0 even if patch doesn't exist *)
@@ -94,7 +98,6 @@ module VCS = struct
   let patch_applied _ _ = Done ()
 
   let revision repo_root =
-    (* 'Weak hash' is only supported from 2.10.3, so provide a fallback *)
     darcs repo_root [ "show"; "repo" ] @@> fun r ->
     OpamSystem.raise_on_process_error r;
     try
@@ -107,19 +110,9 @@ module VCS = struct
            | _ -> None)
         r.OpamProcess.r_stdout
     with Not_found ->
-    try
-      OpamStd.List.find_map
-        (fun s ->
-           match OpamStd.String.rcut_at s ' ' with
-           | Some (label, value)
-             when OpamStd.String.contains ~sub:"Num Patches" label ->
-             Some (Done (Some (Printf.sprintf "darcs-%s" value)))
-           | _ -> None)
-        r.OpamProcess.r_stdout
-    with Not_found ->
       Done None
 
-  let is_up_to_date repo_root _repo_url =
+  let is_up_to_date ?subpath:_ repo_root _repo_url =
     darcs repo_root [ "log"; "-p"; opam_reverse_commit; "--last"; "2" ]
     (* last 2 since the tag counts as one *)
     @@> function
@@ -165,7 +158,7 @@ module VCS = struct
     darcs repo_root [ "whatsnew"; "--summary" ] @@> fun r ->
     OpamSystem.raise_on_process_error r;
     let files =
-      OpamStd.List.filter_map (fun line ->
+      List.filter_map (fun line ->
           match OpamStd.String.split line ' ' with
           | ("A" | "M")::file::[]
           | _::"->"::file::[] -> Some file
@@ -183,18 +176,18 @@ module VCS = struct
            | Some (p,rhs) when p = c -> Some rhs
            | _ -> None
          in
-         match OpamStd.List.filter_map (valid "Cache") r.r_stdout with
+         match List.filter_map (valid "Cache") r.r_stdout with
          | [line] ->
            (let repo =
-              OpamStd.List.filter_map (valid "repo")
-              (OpamStd.String.split line ',')
+              List.filter_map (valid "repo")
+                (OpamStd.String.split line ',')
             in
             match repo with
             | [repo] -> Some repo
             | _ -> None)
          | _ -> None)
       in
-      Done (OpamStd.Option.map (fun u ->
+      Done (Option.map (fun u ->
           OpamUrl.parse ~backend:`darcs u) res)
     | { OpamProcess.r_code = 1; _ } -> Done None
     | r -> OpamSystem.process_error r

@@ -24,6 +24,9 @@ module Version: sig
 
   (** Are two package versions equal? *)
   val equal: t -> t -> bool
+
+  (** Default version used when no version is given *)
+  val default : t
 end
 
 (** Names *)
@@ -113,7 +116,7 @@ val packages_of_names: Set.t -> Name.Set.t -> Set.t
 val filter_name_out: Set.t -> Name.t -> Set.t
 
 (** Return the maximal available version of a package name from a set.
-    Raises [Not_found] if no such package available. *)
+    @raise Not_found if no such package available. *)
 val max_version: Set.t -> Name.t -> t
 
 (** Compare two packages *)

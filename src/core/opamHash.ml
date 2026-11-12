@@ -8,18 +8,31 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
-
 type kind = [ `MD5 | `SHA256 | `SHA512 ]
 
 let default_kind = `MD5
+let all_kinds = [`MD5; `SHA256; `SHA512]
 
 type t = kind * string
 
 let kind = fst
 let contents = snd
 
-let log msg = OpamConsole.log "HASH" msg
+(* Order by hash strength: MD5 < SHA256 < SHA512 *)
+let compare_kind k l =
+  match k, l with
+  | `SHA512, `SHA512 | `SHA256, `SHA256 | `MD5, `MD5 -> 0
+  | `MD5, _ | _, `SHA512 -> -1
+  | `SHA512, _ | _, `MD5 -> 1
+
+let equal_kind k1 k2 = compare_kind k1 k2 = 0
+
+let compare (k,h) (l,i) =
+  match compare_kind k l with
+  | 0 -> String.compare h i
+  | cmp -> cmp
+
+let equal h h' = compare h h' = 0
 
 let pfx_sep_char = '='
 let pfx_sep_str = String.make 1 pfx_sep_char
@@ -36,14 +49,7 @@ let kind_of_string s = match String.lowercase_ascii s with
   | _ -> invalid_arg "OpamHash.kind_of_string"
 
 let is_hex_str len s =
-  String.length s = len &&
-  try
-    String.iter (function
-        | '0'..'9' | 'A'..'F' | 'a'..'f' -> ()
-        | _ -> raise Exit)
-      s;
-    true
-  with Exit -> false
+  String.length s = len && OpamStd.String.is_hex s
 
 let len = function
   | `MD5 -> 32
@@ -51,6 +57,12 @@ let len = function
   | `SHA512 -> 128
 
 let valid kind = is_hex_str (len kind)
+
+let is_null h =
+  let count_not_zero c =
+    function '0' -> c | _ -> succ c
+  in
+  OpamCompat.String.fold_left count_not_zero 0 (contents h) <> 0
 
 let make kind s =
   if valid kind s then kind, String.lowercase_ascii s
@@ -87,35 +99,19 @@ let of_json = function
 let to_path (kind,s) =
   [string_of_kind kind; String.sub s 0 2; s]
 
+let sort checksums =
+  List.sort (fun h h' -> compare h' h) checksums
+
 let compute ?(kind=default_kind) file = match kind with
   | `MD5 -> md5 (Digest.to_hex (Digest.file file))
-  | (`SHA256 | `SHA512) as kind ->
-    let sha =
-      if not OpamCoreConfig.(!r.use_openssl) then
-        OpamSHA.hash kind file
-      else
-      try
-        match
-          OpamSystem.read_command_output ["openssl"; string_of_kind kind; file]
-        with
-        | [l] ->
-          let len = len kind in
-          String.sub l (String.length l - len) len
-        | _ ->
-          log "openssl error, use internal sha library";
-          OpamSHA.hash kind file
-      with OpamSystem.Command_not_found _ | OpamSystem.Process_error _ | OpamSystem.Permission_denied _ ->
-        log "openssl not found, use internal sha library";
-        OpamSHA.hash kind file
-    in
-    make kind sha
+  | (`SHA256 | `SHA512) as kind -> make kind (OpamSHA.hash_file kind file)
 
 let compute_from_string ?(kind=default_kind) str = match kind with
   | `MD5 -> md5 (Digest.to_hex (Digest.string str))
-  | (`SHA256 | `SHA512) as kind ->
-    make kind (OpamSHA.hash_bytes kind (Bytes.of_string str))
+  | (`SHA256 | `SHA512) as kind -> make kind (OpamSHA.hash_string kind str)
 
-let check_file f (kind, _ as h) = compute ~kind f = h
+let check_file f (kind, _ as h) = equal (compute ~kind f) h
+let check_string str (kind, _ as h) = equal (compute_from_string ~kind str) h
 
 let mismatch f (kind, _ as h) =
   let hf = compute ~kind f in

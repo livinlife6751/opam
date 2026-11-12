@@ -1,0 +1,249 @@
+N0REP0
+### OPAMYES=1
+### :I: Conflicts
+### opam switch create --empty conflicts
+### <pkg:pkg.1>
+opam-version: "2.0"
+depends: [
+  "dep-filtered" {>= "2" & < "3"}
+]
+conflicts: [
+  "conflict1"
+  "conflict2"
+  "conflict-ge" {>= "2"}
+  "conflict-lt" {< "3"}
+  "conflict-ge-lt" {>= "2" & < "4"}
+  "disj" {= "1" | = "2"}
+  "repeats" {>= "1"}
+  "repeats" {< "2"}
+  "dep-filtered" {< "2" & >= "3"}
+]
+### <pkg:dep-filtered.1>
+opam-version: "2.0"
+### <pkg:dep-filtered.2>
+opam-version: "2.0"
+### <pkg:dep-filtered.3>
+opam-version: "2.0"
+### <pkg:conflict1.1>
+opam-version: "2.0"
+### <pkg:conflict2.1>
+opam-version: "2.0"
+### <pkg:conflict-ge.1>
+opam-version: "2.0"
+### <pkg:conflict-ge.2>
+opam-version: "2.0"
+### <pkg:conflict-lt.2>
+opam-version: "2.0"
+### <pkg:conflict-lt.3>
+opam-version: "2.0"
+### <pkg:conflict-ge-lt.1>
+opam-version: "2.0"
+### <pkg:conflict-ge-lt.3>
+opam-version: "2.0"
+### <pkg:conflict-ge-lt.4>
+opam-version: "2.0"
+### <pkg:disj.1>
+opam-version: "2.0"
+### <pkg:disj.2>
+opam-version: "2.0"
+### <pkg:disj.3>
+opam-version: "2.0"
+### <pkg:repeats.0>
+opam-version: "2.0"
+### <pkg:repeats.1>
+opam-version: "2.0"
+### <pkg:repeats.2>
+opam-version: "2.0"
+### opam install pkg
+The following actions will be performed:
+=== install 2 packages
+  - install dep-filtered 2 [required by pkg]
+  - install pkg          1
+
+<><> Processing actions <><><><><><><><><><><><><><><><><><><><><><><><><><><><>
+-> installed dep-filtered.2
+-> installed pkg.1
+Done.
+### opam install --show conflict1
+The following actions would be performed:
+=== install 1 package
+  - install conflict1 1
+=== remove 1 package
+  - remove  pkg       1 [conflicts with conflict1]
+### opam install --show conflict2
+The following actions would be performed:
+=== install 1 package
+  - install conflict2 1
+=== remove 1 package
+  - remove  pkg       1 [conflicts with conflict2]
+### opam install --show conflict1 conflict2
+The following actions would be performed:
+=== install 2 packages
+  - install conflict1 1
+  - install conflict2 1
+=== remove 1 package
+  - remove  pkg       1 [conflicts with conflict1, conflict2]
+### opam install --show conflict-ge.1
+The following actions would be performed:
+=== install 1 package
+  - install conflict-ge 1
+### opam install --show conflict-ge.2
+The following actions would be performed:
+=== install 1 package
+  - install conflict-ge 2
+=== remove 1 package
+  - remove  pkg         1 [conflicts with conflict-ge]
+### opam install --show conflict-lt.2
+The following actions would be performed:
+=== install 1 package
+  - install conflict-lt 2
+=== remove 1 package
+  - remove  pkg         1 [conflicts with conflict-lt]
+### opam install --show conflict-lt.3
+The following actions would be performed:
+=== install 1 package
+  - install conflict-lt 3
+### opam install --show conflict-ge-lt.1
+The following actions would be performed:
+=== install 1 package
+  - install conflict-ge-lt 1
+### opam install --show conflict-ge-lt.3
+The following actions would be performed:
+=== install 1 package
+  - install conflict-ge-lt 3
+=== remove 1 package
+  - remove  pkg            1 [conflicts with conflict-ge-lt]
+### opam install --show conflict-ge-lt.4
+The following actions would be performed:
+=== install 1 package
+  - install conflict-ge-lt 4
+### opam install --show disj.1
+The following actions would be performed:
+=== install 1 package
+  - install disj 1
+=== remove 1 package
+  - remove  pkg  1 [conflicts with disj]
+### opam install --show disj.2
+The following actions would be performed:
+=== install 1 package
+  - install disj 2
+=== remove 1 package
+  - remove  pkg  1 [conflicts with disj]
+### opam install --show disj.3
+The following actions would be performed:
+=== install 1 package
+  - install disj 3
+### opam install --show repeats.0
+The following actions would be performed:
+=== install 1 package
+  - install repeats 0
+=== remove 1 package
+  - remove  pkg     1 [conflicts with repeats]
+### opam install --show repeats.1
+The following actions would be performed:
+=== install 1 package
+  - install repeats 1
+=== remove 1 package
+  - remove  pkg     1 [conflicts with repeats]
+### opam install --show repeats.2
+The following actions would be performed:
+=== install 1 package
+  - install repeats 2
+=== remove 1 package
+  - remove  pkg     1 [conflicts with repeats]
+### opam install --show dep-filtered.1
+The following actions would be performed:
+=== downgrade 1 package
+  - downgrade dep-filtered 2 to 1
+=== remove 1 package
+  - remove    pkg          1      [conflicts with dep-filtered]
+### opam install --show dep-filtered.2
+[NOTE] Package dep-filtered is already installed (current version is 2).
+### opam install --show dep-filtered.3
+The following actions would be performed:
+=== upgrade 1 package
+  - upgrade dep-filtered 2 to 3
+=== remove 1 package
+  - remove  pkg          1      [conflicts with dep-filtered]
+### :II: an impossible to install package
+### opam switch create --empty impossible-sw
+### <pkg:impossible.1>
+opam-version: "2.0"
+depends: [
+  "dep-impossible"
+]
+conflicts: [
+  "dep-impossible"
+]
+### <pkg:dep-impossible.1>
+opam-version: "2.0"
+### opam install impossible
+[ERROR] Package conflict!
+  * Incompatible packages:
+    - impossible -> dep-impossible
+    - impossible
+
+No solution found, exiting
+# Return code 20 #
+### :III: Conjuctions
+### opam switch create --empty conjuctions
+### <pkg:conjunction.1>
+opam-version: "2.0"
+conflicts: [
+  "conj-conflict1" & "conj-conflict2"
+]
+### <pkg:conj-conflict1.1>
+opam-version: "2.0"
+### <pkg:conj-conflict2.1>
+opam-version: "2.0"
+### opam install conjunction conj-conflict1 conj-conflict2
+[ERROR] In the opam file for conjunction.1 from repository default:
+          - At packages/conjunction/conjunction.1/opam:2:0-4:1::
+            Conflicts must be a disjunction, '&' is not supported (treated as '|').
+        'conflicts' has been ignored.
+The following actions will be performed:
+=== install 3 packages
+  - install conj-conflict1 1
+  - install conj-conflict2 1
+  - install conjunction    1
+
+<><> Processing actions <><><><><><><><><><><><><><><><><><><><><><><><><><><><>
+-> installed conj-conflict1.1
+-> installed conj-conflict2.1
+-> installed conjunction.1
+Done.
+### :IV: Disjunction
+### opam switch create --empty disjunctions
+### <pkg:disjunction.1>
+opam-version: "2.0"
+conflicts: [
+  "disj-conflict1" | "disj-conflict2"
+]
+### <pkg:disj-conflict1.1>
+opam-version: "2.0"
+### <pkg:disj-conflict2.1>
+opam-version: "2.0"
+### opam install disjunction disj-conflict1
+[ERROR] Package conflict!
+  * Incompatible packages:
+    - disj-conflict1
+    - disjunction
+
+No solution found, exiting
+# Return code 20 #
+### opam install disjunction disj-conflict2
+[ERROR] Package conflict!
+  * Incompatible packages:
+    - disj-conflict2
+    - disjunction
+
+No solution found, exiting
+# Return code 20 #
+### opam install disjunction disj-conflict1 disj-conflict2
+[ERROR] Package conflict!
+  * Incompatible packages:
+    - disj-conflict1
+    - disjunction
+
+No solution found, exiting
+# Return code 20 #

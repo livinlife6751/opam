@@ -1,9 +1,15 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# This script is only used on macOS, where /bin/bash is both guaranteed to exist
+# and to be for the native architecture, which is why /usr/bin/env bash is not used.
+# See https://github.com/ocaml/opam/issues/5450
 set -ue
 
 POL='(version 1)(allow default)(deny network*)(deny file-write*)'
 POL="$POL"'(allow network* (remote unix))'
 POL="$POL"'(allow file-write* (literal "/dev/null") (literal "/dev/dtracehelper"))'
+POL="$POL"'(allow file-write* (regex #"^(/private)?(/var)?/tmp/"))'
+POL="$POL"'(allow file-write* (regex #"^(/private)?/var/folders/"))'
+POL="$POL"'(allow file-write* (regex #"^(/private)?/var/db/mds/"))'
 
 add_mounts() {
     if [ -d "$2" ]; then
@@ -15,14 +21,11 @@ add_mounts() {
     fi
 }
 
-# Even if TMPDIR is set, some applications uses /tmp directly
-add_mounts rw /tmp
-
 if [ -z ${TMPDIR+x} ]; then
-  # Others applications obtain the per-user temporary
+  # Other applications obtain the per-user temporary
   # directory differently; the latter should be made readable/writable
   # too and getconf seems to be a robust way to get it
-  if [ -z /usr/bin/getconf ]; then
+  if command -v getconf > /dev/null ; then
     TMPDIR=$(getconf DARWIN_USER_TEMP_DIR)
     add_mounts rw "$TMPDIR"
     export TMPDIR
@@ -50,14 +53,15 @@ add_ccache_mount() {
 }
 
 add_dune_cache_mount() {
-  local dune_cache=${XDG_CACHE_HOME:-$HOME/.cache}/dune
+  local dune_cache=${DUNE_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/dune}
   mkdir -p "${dune_cache}"
   add_mounts rw "$dune_cache"
 }
 
-# mount unusual path in ro
-if  [ -n "${OPAM_USER_PATH_RO-}" ]; then
-   add_mounts ro $(echo "${OPAM_USER_PATH_RO}" | sed 's|:| |g')
+# In case OPAMROOT happens to be in one of the writeable directories we
+# need to make sure it is read-only
+if [ -n "${OPAMROOT:-}" ]; then
+  add_mounts ro "$OPAMROOT"
 fi
 
 # When using opam variable that must be defined at action time, add them also
@@ -88,5 +92,10 @@ case "$COMMAND" in
         echo "$0: unknown command $COMMAND, must be one of 'build', 'install' or 'remove'" >&2
         exit 2
 esac
+
+if ! command -v "$1" >/dev/null; then
+    echo "[ERROR] Command not found: $1" >&2
+    exit 10
+fi
 
 exec sandbox-exec -p "$POL" "$@"

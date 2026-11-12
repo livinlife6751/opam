@@ -9,18 +9,15 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
-
 module type SET = sig
   include Set.S
-  val map: (elt -> elt) -> t -> t
   val is_singleton: t -> bool
   val choose_one : t -> elt
-  val choose_opt : t -> elt option
   val of_list: elt list -> t
+  val to_list_map: (elt -> 'b) -> t -> 'b list
   val to_string: t -> string
-  val to_json: t -> OpamJson.t
-  val of_json: OpamJson.t -> t option
+  val to_json: t OpamJson.encoder
+  val of_json: t OpamJson.decoder
   val find: (elt -> bool) -> t -> elt
   val find_opt: (elt -> bool) -> t -> elt option
   val safe_add: elt -> t -> t
@@ -34,28 +31,27 @@ module type SET = sig
   end
 end
 module type MAP = sig
-  include Map.S
+  include OpamCompat.MAP
   val to_string: ('a -> string) -> 'a t -> string
-  val to_json: ('a -> OpamJson.t) -> 'a t -> OpamJson.t
-  val of_json: (OpamJson.t -> 'a option) -> OpamJson.t -> 'a t option
+  val to_json: 'a OpamJson.encoder -> 'a t OpamJson.encoder
+  val of_json: 'a OpamJson.decoder -> 'a t OpamJson.decoder
   val keys: 'a t -> key list
   val values: 'a t -> 'a list
-  val find_opt: key -> 'a t -> 'a option
-  val choose_opt: 'a t -> (key * 'a) option
-  val union: ('a -> 'a -> 'a) -> 'a t -> 'a t -> 'a t
+  val strict_union : ('a -> 'a -> 'a) -> 'a t -> 'a t -> 'a t
   val is_singleton: 'a t -> bool
   val of_list: (key * 'a) list -> 'a t
   val safe_add: key -> 'a -> 'a t -> 'a t
-  val update: key -> ('a -> 'a) -> 'a -> 'a t -> 'a t
   val map_reduce:
     ?default:'b -> (key -> 'a -> 'b) -> ('b -> 'b -> 'b) -> 'a t -> 'b
 end
 module type ABSTRACT = sig
   type t
+  val compare: t -> t -> int
+  val equal: t -> t -> bool
   val of_string: string -> t
   val to_string: t -> string
-  val to_json: t -> OpamJson.t
-  val of_json: OpamJson.t -> t option
+  val to_json: t OpamJson.encoder
+  val of_json: t OpamJson.decoder
   module Set: SET with type elt = t
   module Map: MAP with type key = t
 end
@@ -63,15 +59,24 @@ end
 module type OrderedType = sig
   include Set.OrderedType
   val to_string: t -> string
-  val to_json: t -> OpamJson.t
-  val of_json: OpamJson.t -> t option
+  val to_json: t OpamJson.encoder
+  val of_json: t OpamJson.decoder
+end
+
+module OpamCompare = struct
+  external compare : 't -> 't -> int = "%compare"
+  external equal : 't -> 't -> bool = "%equal"
+  external (=) : 't -> 't -> bool = "%equal"
+  external (<>) : 't -> 't -> bool = "%notequal"
+  external (<) : 't -> 't -> bool = "%lessthan"
+  external (>) : 't -> 't -> bool = "%greaterthan"
+  external (<=) : 't -> 't -> bool = "%lessequal"
+  external (>=) : 't -> 't -> bool = "%greaterequal"
 end
 
 let max_print = 100
 
 module OpamList = struct
-
-  let cons x xs = x :: xs
 
   let concat_map ?(left="") ?(right="") ?nil ?last_sep sep f =
     let last_sep = match last_sep with None -> sep | Some sep -> sep in
@@ -105,39 +110,30 @@ module OpamList = struct
       assert (pos = 0);
       Bytes.to_string buf
 
-  let rec find_opt f = function
-    | [] -> None
-    | x::r -> if f x then Some x else find_opt f r
-
   let to_string f =
     concat_map ~left:"{ " ~right:" }" ~nil:"{}" ", " f
 
-  let rec remove_duplicates_eq eq = function
-    | a::(b::_ as r) when eq a b -> remove_duplicates_eq eq r
-    | a::r -> a::remove_duplicates_eq eq r
+  let rec remove_duplicates eq = function
+    | a::(b::_ as r) when eq a b -> remove_duplicates eq r
+    | a::r -> a::remove_duplicates eq r
     | [] -> []
 
-  let remove_duplicates l = remove_duplicates_eq ( = ) l
-
   let sort_nodup cmp l =
-    remove_duplicates_eq (fun a b -> cmp a b = 0) (List.sort cmp l)
+    remove_duplicates (fun a b -> cmp a b = 0) (List.sort cmp l)
 
-  let filter_map f l =
-    let rec loop accu = function
-      | []     -> List.rev accu
-      | h :: t ->
-        match f h with
-        | None   -> loop accu t
-        | Some x -> loop (x::accu) t in
-    loop [] l
-
-  let filter_some l = filter_map (fun x -> x) l
+  let filter_some l = List.filter_map (fun x -> x) l
 
   let rec find_map f = function
     | [] -> raise Not_found
     | x::r -> match f x with
       | Some r -> r
       | None -> find_map f r
+
+  let rec find_map_opt f = function
+    | [] -> None
+    | x::r -> match f x with
+      | Some r -> Some r
+      | None -> find_map_opt f r
 
   let insert comp x l =
     let rec aux = function
@@ -151,24 +147,54 @@ module OpamList = struct
     | l when index <= 0 -> value :: l
     | x::l -> x :: insert_at (index - 1) value l
 
-  let rec assoc_opt x = function
-      [] -> None
-    | (a,b)::l -> if compare a x = 0 then Some b else assoc_opt x l
+  let rec mem eq a = function
+    | [] -> false
+    | x::xs -> if eq a x then true else mem eq a xs
 
-  let pick_assoc x l =
+  let rec assoc eq x = function
+    | [] -> raise Not_found
+    | (a,b)::r -> if eq a x then b else assoc eq x r
+
+  let rec assoc_opt eq x = function
+    |  [] -> None
+    | (a,b)::l -> if eq a x then Some b else assoc_opt eq x l
+
+  let pick f l =
+    let rec aux acc = function
+      | [] -> None, l
+      | x::l ->
+        if f x then Some x, List.rev_append acc l
+        else aux (x::acc) l
+    in
+    aux [] l
+
+  let pick_assoc eq x l =
     let rec aux acc = function
       | [] -> None, l
       | (k,v) as b::r ->
-        if k = x then Some v, List.rev_append acc r
+        if eq k x then Some v, List.rev_append acc r
         else aux (b::acc) r
     in
     aux [] l
 
-  let update_assoc k v l =
+  let rec mem_assoc eq x = function
+    | [] -> false
+    | (a,_)::r -> eq a x || mem_assoc eq x r
+
+  let update_assoc eq k v l =
     let rec aux acc = function
       | [] -> List.rev ((k,v)::acc)
       | (k1,_) as b::r ->
-        if k1 = k then List.rev_append acc ((k,v)::r)
+        if eq k1 k then List.rev_append acc ((k,v)::r)
+        else aux (b::acc) r
+    in
+    aux [] l
+
+  let remove_assoc eq k l =
+    let rec aux acc = function
+      | [] -> List.rev acc
+      | (k1,_) as b::r ->
+        if eq k1 k then List.rev_append acc r
         else aux (b::acc) r
     in
     aux [] l
@@ -184,13 +210,6 @@ module Set = struct
 
     include S
 
-    let fold f set i =
-      let r = ref i in
-      S.iter (fun elt ->
-          r := f elt !r
-        ) set;
-      !r
-
     let is_singleton s =
       not (is_empty s) &&
       min_elt s == max_elt s
@@ -200,11 +219,11 @@ module Set = struct
       else if is_singleton s then choose s
       else failwith "choose_one"
 
-    let choose_opt s =
-      try Some (choose s) with Not_found -> None
-
     let of_list l =
       List.fold_left (fun set e -> add e set) empty l
+
+    let to_list_map f set =
+      fold (fun x acc -> f x :: acc) set []
 
     let to_string s =
       if S.cardinal s > max_print then
@@ -212,9 +231,6 @@ module Set = struct
       else
         let l = S.fold (fun nv l -> O.to_string nv :: l) s [] in
         OpamList.to_string (fun x -> x) (List.rev l)
-
-    let map f t =
-      S.fold (fun e set -> S.add (f e) set) t S.empty
 
     exception Found of elt
 
@@ -282,26 +298,9 @@ module Map = struct
 
   module Make (O : OrderedType) = struct
 
-    module M = Map.Make(O)
+    module M = OpamCompat.Map(O)
 
     include M
-
-    let fold f map i =
-      let r = ref i in
-      M.iter (fun key value->
-          r:= f key value !r
-        ) map;
-      !r
-
-    let map f map =
-      fold (fun key value map ->
-          add key (f value) map
-        ) map empty
-
-    let mapi f map =
-      fold (fun key value map ->
-          add key (f key value) map
-        ) map empty
 
     let values map =
       List.rev (M.fold (fun _ v acc -> v :: acc) map [])
@@ -309,12 +308,8 @@ module Map = struct
     let keys map =
       List.rev (M.fold (fun k _ acc -> k :: acc) map [])
 
-    let union f m1 m2 =
-      M.merge (fun _ a b -> match a, b with
-          | Some _ as s, None | None, (Some _ as s) -> s
-          | Some v1, Some v2 -> Some (f v1 v2)
-          | None, None -> assert false)
-        m1 m2
+    let strict_union f m1 m2 =
+      union (fun _key v1 v2 -> Some (f v1 v2)) m1 m2
 
     let is_singleton s =
       not (is_empty s) &&
@@ -345,8 +340,8 @@ module Map = struct
             let get_pair = function
               | `O binding ->
                 begin match
-                    O.of_json (List.assoc "key" binding),
-                    value_of_json (List.assoc "value" binding)
+                    O.of_json (OpamList.assoc String.equal "key" binding),
+                    value_of_json (OpamList.assoc String.equal "value" binding)
                   with
                   | Some key, Some value -> (key, value)
                   | _ -> raise Not_found
@@ -358,19 +353,10 @@ module Map = struct
         end
       | _ -> None
 
-    let find_opt k map = try Some (find k map) with Not_found -> None
-
-    let choose_opt m =
-      try Some (choose m) with Not_found -> None
-
     let safe_add k v map =
       if mem k map
       then failwith (Printf.sprintf "duplicate entry %s" (O.to_string k))
       else add k v map
-
-    let update k f zero map =
-      let v = try find k map with Not_found -> zero in
-      add k (f v) map
 
     let map_reduce ?default f op t =
       match choose_opt t with
@@ -386,6 +372,8 @@ end
 
 module AbstractString = struct
   type t = string
+  let compare = String.compare
+  let equal = String.equal
   let of_string x = x
   let to_string x = x
   let to_json x = `String x
@@ -406,7 +394,7 @@ end
 
 module OInt = struct
   type t = int
-  let compare = compare
+  let compare = Int.compare
   let to_string = string_of_int
   let to_json i = `String (string_of_int i)
   let of_json = function
@@ -420,14 +408,6 @@ module IntSet = Set.Make(OInt)
 
 
 module Option = struct
-  let map f = function
-    | None -> None
-    | Some x -> Some (f x)
-
-  let iter f = function
-    | None -> ()
-    | Some x -> f x
-
   let default dft = function
     | None -> dft
     | Some x -> x
@@ -444,21 +424,14 @@ module Option = struct
     | None -> dft
     | Some x -> f x
 
-  let compare cmp o1 o2 = match o1,o2 with
-    | None, None -> 0
-    | Some _, None -> 1
-    | None, Some _ -> -1
-    | Some x1, Some x2 -> cmp x1 x2
+  let equal_some f v1 = function
+    | None -> false
+    | Some v2 -> f v1 v2
 
   let to_string ?(none="") f = function
     | Some x -> f x
     | None -> none
 
-  let to_list = function
-    | None -> []
-    | Some x -> [x]
-
-  let some x = Some x
   let none _ = None
 
   let of_Not_found f x =
@@ -468,7 +441,7 @@ module Option = struct
     let (>>=) = function
       | None -> fun _ -> None
       | Some x -> fun f -> f x
-    let (>>|) opt f = map f opt
+    let (>>|) opt f = Option.map f opt
     let (>>+) opt f = match opt with
       | None -> f ()
       | some -> some
@@ -479,13 +452,21 @@ module Option = struct
   end
 end
 
+module OpamChar = struct
 
+  (* TODO: Replace by Stdlib.Char.Ascii.is_space
+     (to be introduced in OCaml 5.4) *)
+  let is_whitespace = function
+    | ' ' | '\t' | '\r' | '\n' -> true
+    | _ -> false
+
+end
 
 module OpamString = struct
 
   module OString = struct
     type t = string
-    let compare = compare
+    let compare = String.compare
     let to_string x = x
     let to_json x = `String x
     let of_json = function
@@ -501,24 +482,6 @@ module OpamString = struct
 
   module Set = StringSet
   module Map = StringMap
-
-  let starts_with ~prefix s =
-    let x = String.length prefix in
-    let n = String.length s in
-    n >= x &&
-    let rec chk i = i >= x || prefix.[i] = s.[i] && chk (i+1) in
-    chk 0
-
-  let ends_with ~suffix s =
-    let x = String.length suffix in
-    let n = String.length s in
-    n >= x &&
-    let rec chk i = i >= x || suffix.[i] = s.[i+n-x] && chk (i+1) in
-    chk 0
-
-  let contains_char s c =
-    try let _ = String.index s c in true
-    with Not_found -> false
 
   let contains ~sub =
     Re.(execp (compile (str sub)))
@@ -548,32 +511,22 @@ module OpamString = struct
           raise Not_found in
       g i
 
-  let map f s =
-    let len = String.length s in
-    let b = Bytes.create len in
-    for i = 0 to len - 1 do Bytes.set b i (f s.[i]) done;
-    Bytes.to_string b
-
-  let is_whitespace = function
-    | ' ' | '\t' | '\r' | '\n' -> true
-    | _ -> false
-
   let strip str =
     let p = ref 0 in
     let l = String.length str in
-    while !p < l && is_whitespace (String.unsafe_get str !p) do
+    while !p < l && OpamChar.is_whitespace (String.unsafe_get str !p) do
       incr p;
     done;
     let p = !p in
     let l = ref (l - 1) in
-    while !l >= p && is_whitespace (String.unsafe_get str !l) do
+    while !l >= p && OpamChar.is_whitespace (String.unsafe_get str !l) do
       decr l;
     done;
     String.sub str p (!l - p + 1)
 
   let strip_right str =
     let rec aux i =
-      if i < 0 || not (is_whitespace str.[i]) then i else aux (i-1)
+      if i < 0 || not (OpamChar.is_whitespace str.[i]) then i else aux (i-1)
     in
     let l = String.length str in
     let i = aux (l-1) in
@@ -587,7 +540,7 @@ module OpamString = struct
       String.sub s 0 n
 
   let remove_prefix ~prefix s =
-    if starts_with ~prefix s then
+    if OpamCompat.String.starts_with ~prefix s then
       let x = String.length prefix in
       let n = String.length s in
       String.sub s x (n - x)
@@ -595,7 +548,7 @@ module OpamString = struct
       s
 
   let remove_suffix ~suffix s =
-    if ends_with ~suffix s then
+    if OpamCompat.String.ends_with ~suffix s then
       let x = String.length suffix in
       let n = String.length s in
       String.sub s 0 (n - x)
@@ -616,9 +569,25 @@ module OpamString = struct
   let rcut_at = cut_at_aux String.rindex
 
   let split s c =
-    (* old compat version (Re 1.2.0)
-       {[Re_str.split (Re_str.regexp (Printf.sprintf "[%c]+" c)) s]} *)
-    Re.(split (compile (rep1 (char c)))) s
+    let rec loop acc i slice_start len s c =
+      if (i : int) < (len : int) then
+        if s.[i] = (c : char) then
+          let acc =
+            if (slice_start : int) < (i : int) then
+              String.sub s slice_start (i - slice_start) :: acc
+            else
+              acc
+          in
+          let i = i+1 in
+          loop acc i i len s c
+        else
+          loop acc (i+1) slice_start len s c
+      else if (i : int) = (slice_start : int) then
+        acc
+      else
+        String.sub s slice_start (len - slice_start) :: acc
+    in
+    List.rev (loop [] 0 0 (String.length s) s c)
 
   let split_delim s c =
     let tokens = Re.(split_full (compile (char c)) s) in
@@ -634,30 +603,87 @@ module OpamString = struct
       |_ -> []
     in List.rev (aux acc0 tokens)
 
-  let fold_left f acc s =
-    let acc = ref acc in
-    for i = 0 to String.length s - 1 do acc := f !acc s.[i] done;
-    !acc
+  let split_quoted path sep =
+    let length = String.length path in
+    let rec f acc index current last normal =
+      if (index : int) = length then
+        let current = current ^ String.sub path last (index - last) in
+        List.rev (if current <> "" then current::acc else acc)
+      else
+      let c = path.[index]
+      and next = succ index in
+      if (c : char) = sep && normal || c = '"' then
+        let current = current ^ String.sub path last (index - last) in
+        if c = '"' then
+          f acc next current next (not normal)
+        else
+        let acc = if current = "" then acc else current::acc in
+        f acc next "" next true
+      else
+        f acc next current last normal in
+    f [] 0 "" 0 true
+
+  let rec compare_case_aux len s1 s2 i =
+    if i < (len : int) then
+      let c1 = String.unsafe_get s1 i and c2 = String.unsafe_get s2 i in
+      match Char.compare (Char.lowercase_ascii c1) (Char.lowercase_ascii c2)
+      with
+      | 0 ->
+        (match Char.compare c1 c2 with
+         | 0 -> compare_case_aux len s1 s2 (i+1)
+         | c -> c)
+      | c -> c
+    else
+      let l1 = String.length s1 and l2 = String.length s2 in
+      if l1 < (l2 : int) then -1
+      else if l1 > (l2 : int) then 1
+      else 0
 
   let compare_case s1 s2 =
-    let l1 = String.length s1 and l2 = String.length s2 in
-    let len = min l1 l2 in
-    let rec aux i =
-      if i < len then
-        let c1 = s1.[i] and c2 = s2.[i] in
-        match Char.compare (Char.lowercase_ascii c1) (Char.lowercase_ascii c2)
-        with
-        | 0 ->
-          (match Char.compare c1 c2 with
-           | 0 -> aux (i+1)
-           | c -> c)
-        | c -> c
+    let len = OpamCompat.Int.min (String.length s1) (String.length s2) in
+    compare_case_aux len s1 s2 0
+
+  let rec case_insensitive_compare_aux ~len ~s1 ~s2 i =
+    if i < (len : int) then
+      let cmp =
+        Char.compare (Char.lowercase_ascii s1.[i]) (Char.lowercase_ascii s2.[i])
+      in
+      if cmp < 0 then -1
+      else if cmp > 0 then 1
       else
-        if l1 < l2 then -1
-        else if l1 > l2 then 1
-        else 0
-    in
-    aux 0
+        case_insensitive_compare_aux ~len ~s1 ~s2 (i+1)
+    else
+      let l1 = String.length s1 and l2 = String.length s2 in
+      if l1 < (l2 : int) then -1
+      else if l1 > (l2 : int) then 1
+      else 0
+
+  let case_insensitive_compare s1 s2 =
+    let len = OpamCompat.Int.min (String.length s1) (String.length s2) in
+    case_insensitive_compare_aux ~len ~s1 ~s2 0
+
+  let case_insensitive_equal s1 s2 =
+    let l1 = String.length s1 and l2 = String.length s2 in
+    Int.equal l1 l2 && case_insensitive_compare s1 s2 = 0
+
+  let is_prefix_of ~from ~full s =
+    let length_s = String.length s in
+    let length_full = String.length full in
+    if from < 0 || from > length_full then
+      invalid_arg "is_prefix_of"
+    else
+      length_s <= length_full
+      && length_s > from
+      && String.sub full 0 length_s = s
+
+  let is_hex s =
+    try
+      String.iter (function
+          | '0'..'9' | 'A'..'F' | 'a'..'f' -> ()
+          | _ -> raise Exit)
+        s;
+      true
+    with Exit -> false
 
 end
 
@@ -670,7 +696,7 @@ module Env = struct
   (* Remove from a c-separated list of string the one with the given prefix *)
   let reset_value ~prefix c v =
     let v = OpamString.split v c in
-    List.filter (fun v -> not (OpamString.starts_with ~prefix v)) v
+    List.filter (fun v -> not (OpamCompat.String.starts_with ~prefix v)) v
 
   (* Split the list in two according to the first occurrence of the string
      starting with the given prefix.
@@ -680,37 +706,130 @@ module Env = struct
     let rec aux before =
       function
       | [] -> [], List.rev before
-      | curr::after when OpamString.starts_with ~prefix curr ->
+      | curr::after when OpamCompat.String.starts_with ~prefix curr ->
         before, after
       | curr::after -> aux (curr::before) after
     in aux [] v
-
-  let list =
-    let lazy_env = lazy (
-      let e = Unix.environment () in
-      List.rev_map (fun s ->
-          match OpamString.cut_at s '=' with
-          | None   -> s, ""
-          | Some p -> p
-        ) (Array.to_list e)
-    ) in
-    fun () -> Lazy.force lazy_env
-
-  let get =
-    if Sys.win32 then
-      fun n ->
-        let n = String.uppercase_ascii n in
-        snd (List.find (fun (k,_) -> String.uppercase_ascii k = n) (list ()))
-    else
-      fun n -> List.assoc n (list ())
-
-  let getopt n = try Some (get n) with Not_found -> None
 
   let escape_single_quotes ?(using_backslashes=false) =
     if using_backslashes then
       Re.(replace (compile (set "\\\'")) ~f:(fun g -> "\\"^Group.get g 0))
     else
       Re.(replace_string (compile (char '\'')) ~by:"'\"'\"'")
+
+  let escape_powershell =
+    (* escape single quotes with two single quotes.
+       https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_quoting_rules?view=powershell-7.1 *)
+    Re.(replace_string (compile (char '\'')) ~by:"''")
+
+  module Name = struct
+    module M = struct
+      include AbstractString
+
+      let compare =
+        if Sys.win32 then
+          OpamString.case_insensitive_compare
+        else
+          String.compare
+
+      let equal =
+        if Sys.win32 then
+          OpamString.case_insensitive_equal
+        else
+          String.equal
+    end
+
+    type t = string
+
+    let of_string = M.of_string
+    let to_string = M.to_string
+    let of_json = M.of_json
+    let to_json = M.to_json
+    let compare = M.compare
+    let equal = M.equal
+
+    let equal_string = M.equal
+
+    module Set = Set.Make(M)
+    module Map = Map.Make(M)
+  end
+
+  type raw = string array
+
+  let raw_env = Unix.environment
+
+  let env_starts_with =
+    if Sys.win32 then
+      fun ~prefix x ->
+        let prefix = String.lowercase_ascii prefix in
+        let x = String.lowercase_ascii x in
+        OpamCompat.String.starts_with ~prefix x
+    else
+      OpamCompat.String.starts_with
+
+  let get_from_array env key =
+    let prefix = key ^ "=" in
+    let prefix_len = String.length prefix in
+    let exception Found of string in
+    try
+      for i = 0 to Array.length env - 1 do
+        let x = env.(i) in
+        if env_starts_with ~prefix x then
+          raise_notrace (Found x)
+      done;
+      None
+    with Found x ->
+      Some (String.sub x prefix_len (String.length x - prefix_len))
+
+  let add_and_replace env (key, value) =
+    let prefix = key ^ "=" in
+    let elem = prefix ^ value in
+    (* We always append [elem] to the environment instead of setting inplace
+       to avoid the double copy as we need to copy once anyway *)
+    let env = Array.append env [|elem|] in
+    for i = 0 to Array.length env - 2 do
+      let x = env.(i) in
+      if env_starts_with ~prefix x then
+        env.(i) <- elem;
+    done;
+    env
+
+  let to_list env =
+    List.rev_map (fun s ->
+        match OpamString.cut_at s '=' with
+        | None   -> s, ""
+        | Some p -> p)
+      (Array.to_list env)
+
+  let list =
+    let lazy_env = lazy (to_list (raw_env ())) in
+    fun () -> Lazy.force lazy_env
+
+  let cyg_env ~env ~cygbin ~git_location =
+    let f v =
+      match OpamString.cut_at v '=' with
+      | Some (path, c) when Name.equal_string path "path" ->
+        (match git_location with
+         | None ->
+           Printf.sprintf "%s=%s;%s" path cygbin c
+         | Some git_location ->
+           if String.equal git_location cygbin then
+             Printf.sprintf "%s=%s;%s" path cygbin c
+           else
+             Printf.sprintf "%s=%s;%s;%s" path git_location cygbin c)
+      | _ -> v
+    in
+    Array.map f env
+
+  let get_full n = List.find (fun (k,_) -> Name.equal k n) (list ())
+
+  let get n = snd (get_full n)
+
+  let getopt = Option.of_Not_found get
+
+  let getopt_full n =
+    try let (n, v) = get_full n in (n, Some v)
+    with Not_found -> (n, None)
 end
 
 
@@ -726,41 +845,29 @@ module OpamSys = struct
   let path_sep = if Sys.win32 then ';' else ':'
 
   let split_path_variable ?(clean=true) =
-    if Sys.win32 then fun path ->
-      let length = String.length path in
-      let rec f acc index current last normal =
-        if index = length then
-          let current = current ^ String.sub path last (index - last) in
-          List.rev (if current <> "" then current::acc else acc)
-        else let c = path.[index]
-          and next = succ index in
-          if c = ';' && normal || c = '"' then
-            let current = current ^ String.sub path last (index - last) in
-            if c = '"' then
-              f acc next current next (not normal)
-            else
-            let acc = if current = "" then acc else current::acc in
-            f acc next "" next true
-          else
-            f acc next current last normal in
-      f [] 0 "" 0 true
+    if Sys.win32 then
+      fun path -> OpamString.split_quoted path ';'
     else fun path ->
       let split = if clean then OpamString.split else OpamString.split_delim in
       split path path_sep
 
-  let with_process_in cmd args f =
+  let process_in cmd args =
     if Sys.win32 then
       assert false;
-    let path = split_path_variable (Env.get "PATH") in
-    let cmd =
-      List.find Sys.file_exists (List.map (fun d -> Filename.concat d cmd) path)
-    in
-    let ic = Unix.open_process_in (cmd^" "^args) in
+    let env = Env.raw_env () in
     try
-      let r = f ic in
-      ignore (Unix.close_process_in ic) ; r
-    with exn ->
-      ignore (Unix.close_process_in ic) ; raise exn
+      let path = split_path_variable (Env.get "PATH") in
+      let cmd =
+        List.find OpamStubs.is_executable
+          (List.map (fun d -> Filename.concat d cmd) path)
+      in
+      let args = Array.of_list (cmd :: args) in
+      let (ic, _, _) as p = Unix.open_process_args_full cmd args env in
+      let r = input_line ic in
+      match Unix.close_process_full p with
+      | Unix.WEXITED 0 -> Some r
+      | WEXITED _ | WSIGNALED _ | WSTOPPED _ -> None
+    with Unix.Unix_error _ | Sys_error _ | End_of_file | Not_found -> None
 
   let tty_out = Unix.isatty Unix.stdout
 
@@ -777,24 +884,16 @@ module OpamSys = struct
   )
 
   let get_terminal_columns () =
-    let fallback = 80 in
-    let cols =
-      try (* terminfo *)
-        with_process_in "tput" "cols"
-          (fun ic -> int_of_string (input_line ic))
-      with
-      | Unix.Unix_error _ | Sys_error _ | Failure _ | End_of_file | Not_found ->
-        try (* GNU stty *)
-          with_process_in "stty" "size"
-            (fun ic ->
-               match OpamString.split (input_line ic) ' ' with
-               | [_ ; v] -> int_of_string v
-               | _ -> failwith "stty")
-        with
-        | Unix.Unix_error _ | Sys_error _ | Failure _
-        | End_of_file | Not_found -> fallback
-    in
-    if cols > 0 then cols else fallback
+    try int_of_string (Env.get "COLUMNS") with
+    | Not_found | Failure _ ->
+      let fallback = 80 in
+      let cols =
+        if tty_out then
+          OpamStubs.get_stdout_ws_col ()
+        else
+          fallback
+      in
+      if cols > 0 then cols else fallback
 
   let win32_get_console_width default_columns =
     try
@@ -809,7 +908,7 @@ module OpamSys = struct
   let terminal_columns =
     let v = ref (lazy (get_terminal_columns ())) in
     let () =
-      try Sys.set_signal 28 (* SIGWINCH *)
+      try Sys.set_signal OpamCompat.Sys.sigwinch
             (Sys.Signal_handle
                (fun _ -> v := lazy (get_terminal_columns ())))
       with Invalid_argument _ -> ()
@@ -828,27 +927,33 @@ module OpamSys = struct
        forcing the environment in this function that is used
        before the .init() functions are called -- see
        OpamStateConfig.default. *)
-    let home = lazy (try Unix.getenv "HOME" with Not_found -> Sys.getcwd ()) in
+    let home = lazy (
+      try Unix.getenv "HOME"
+      with Not_found ->
+        if Sys.win32 then
+          OpamStubs.getPathToHome ()
+        else
+          Sys.getcwd ()
+    ) in
     fun () -> Lazy.force home
 
   let etc () = "/etc"
 
   let uname =
-    let memo = Hashtbl.create 7 in
-    fun arg ->
-      try Hashtbl.find memo arg with Not_found ->
-        let r =
-          try
-            with_process_in "uname" arg
-              (fun ic -> Some (OpamString.strip (input_line ic)))
-          with Unix.Unix_error _ | Sys_error _ | Not_found -> None
-        in
-        Hashtbl.add memo arg r;
-        r
+    let uname = lazy (OpamStubs.uname ()) in
+    fun () ->
+      Lazy.force uname
 
-  let system () =
-    (* CSIDL_SYSTEM = 0x25 *)
-    OpamStubs.(shGetFolderPath 0x25 SHGFP_TYPE_CURRENT)
+  (* We need to call [uname] here as the only way to get it
+     in C without calling a process or lookup files is to
+     use [__Freebsd_version] which is a define, so it is set
+     at compile time. *)
+  let get_freebsd_version () = process_in "uname" ["-U"]
+  let get_long_bit () = process_in "getconf" ["LONG_BIT"]
+
+  let system =
+    let system = Lazy.from_fun OpamStubs.getPathToSystem in
+    fun () -> Lazy.force system
 
   type os =
     | Darwin
@@ -859,6 +964,7 @@ module OpamSys = struct
     | DragonFly
     | Cygwin
     | Win32
+    | Haiku
     | Unix
     | Other of string
 
@@ -866,14 +972,15 @@ module OpamSys = struct
     let os = lazy (
       match Sys.os_type with
       | "Unix" -> begin
-          match uname "-s" with
-          | Some "Darwin"    -> Darwin
-          | Some "Linux"     -> Linux
-          | Some "FreeBSD"   -> FreeBSD
-          | Some "OpenBSD"   -> OpenBSD
-          | Some "NetBSD"    -> NetBSD
-          | Some "DragonFly" -> DragonFly
-          | _                -> Unix
+          match (uname ()).sysname with
+          | "Darwin"    -> Darwin
+          | "Linux"     -> Linux
+          | "FreeBSD"   -> FreeBSD
+          | "OpenBSD"   -> OpenBSD
+          | "NetBSD"    -> NetBSD
+          | "DragonFly" -> DragonFly
+          | "Haiku"     -> Haiku
+          | _           -> Unix
         end
       | "Win32"  -> Win32
       | "Cygwin" -> Cygwin
@@ -881,7 +988,21 @@ module OpamSys = struct
     ) in
     fun () -> Lazy.force os
 
+  type powershell_host = Powershell_pwsh | Powershell
   type shell = SH_sh | SH_bash | SH_zsh | SH_csh | SH_fish
+    | SH_pwsh of powershell_host | SH_cmd
+
+  let all_shells =
+    [SH_sh; SH_bash;
+     SH_zsh;
+     SH_csh;
+     SH_fish;
+     SH_pwsh Powershell_pwsh;
+     SH_pwsh Powershell;
+     SH_cmd]
+
+  let windows_default_shell = SH_cmd
+  let unix_default_shell = SH_sh
 
   let shell_of_string = function
     | "tcsh"
@@ -890,6 +1011,8 @@ module OpamSys = struct
     | "zsh"  -> Some SH_zsh
     | "bash" -> Some SH_bash
     | "fish" -> Some SH_fish
+    | "pwsh" -> Some (SH_pwsh Powershell_pwsh)
+    | "dash"
     | "sh"   -> Some SH_sh
     | _      -> None
 
@@ -903,48 +1026,103 @@ module OpamSys = struct
     else
       fun x -> x
 
+  let chop_exe_suffix name =
+    Option.default name (Filename.chop_suffix_opt name ~suffix:".exe")
+
+  let windows_process_ancestry = Lazy.from_fun OpamStubs.getProcessAncestry
+
+  type shell_choice = Accept of shell
+
+  let windows_get_shell =
+    let categorize_process (_, image) =
+      match String.lowercase_ascii (Filename.basename image) with
+      | "powershell.exe" | "powershell_ise.exe" ->
+        Some (Accept (SH_pwsh Powershell))
+      | "pwsh.exe" -> Some (Accept (SH_pwsh Powershell_pwsh))
+      | "cmd.exe" -> Some (Accept SH_cmd)
+      | "" -> None
+      | name ->
+        Stdlib.Option.map
+          (fun shell -> Accept shell)
+          (shell_of_string (chop_exe_suffix name))
+    in
+    lazy (
+      let lazy ancestors = windows_process_ancestry in
+      match List.filter_map categorize_process ancestors with
+      | [] -> None
+      | Accept most_relevant_shell :: _ -> Some most_relevant_shell
+    )
+
   let guess_shell_compat () =
-    let parent_guess =
-      if Sys.win32 then
-        None
-      else
-        let ppid = Unix.getppid () in
-        let dir = Filename.concat "/proc" (string_of_int ppid) in
-        try
-          Some (Unix.readlink (Filename.concat dir "exe"))
-        with e ->
-          fatal e;
-          try
-            with_process_in "ps"
-              (Printf.sprintf "-p %d -o comm= 2>/dev/null" ppid)
-              (fun ic -> Some (input_line ic))
-          with
-          | Unix.Unix_error _ | Sys_error _ | Failure _ | End_of_file | Not_found ->
-              try
-                let c = open_in_bin ("/proc/" ^ string_of_int ppid ^ "/cmdline") in
-                begin try
-                  let s = input_line c in
+    let parent_guess () =
+      let ppid = Unix.getppid () in
+      let dir = Filename.concat "/proc" (string_of_int ppid) in
+      try
+        Some (Unix.readlink (Filename.concat dir "exe"))
+      with e ->
+        fatal e;
+        match
+          process_in "ps" ["-p"; string_of_int ppid; "-o"; "comm="]
+        with
+        | Some _ as x -> x
+        | None ->
+            try
+              let c = open_in_bin ("/proc/" ^ string_of_int ppid ^ "/cmdline") in
+              begin try
+                let s = input_line c in
+                close_in c;
+                Some (String.sub s 0 (String.index s '\000'))
+              with
+              | Not_found ->
+                  None
+              | e ->
                   close_in c;
-                  Some (String.sub s 0 (String.index s '\000'))
-                with
-                | Not_found ->
-                    None
-                | e ->
-                    close_in c;
-                    fatal e; None
-                end
-              with e ->
-                fatal e; None
+                  fatal e; None
+              end
+            with e ->
+              fatal e; None
     in
     let test shell = shell_of_string (Filename.basename shell) in
-    let shell =
-      match Option.replace test parent_guess with
-      | None ->
+    if Sys.win32 then
+      let shell =
+        match Lazy.force windows_get_shell with
+        | None ->
           Option.of_Not_found Env.get "SHELL" |> Option.replace test
-      | some ->
+        | some ->
           some
+        in
+      Option.default windows_default_shell shell
+    else
+      let shell =
+        match Option.replace test (parent_guess ()) with
+        | None ->
+            Option.of_Not_found Env.get "SHELL" |> Option.replace test
+        | some ->
+            some
+      in
+      Option.default unix_default_shell shell
+
+  let guess_bash_dot_profile () =
+    let home f =
+      try Filename.concat (home ()) f
+      with Not_found -> f
     in
-    Option.default SH_sh shell
+    try
+      List.find Sys.file_exists [
+        (* Bash looks up these 3 files in order and only loads the first,
+           for LOGIN shells *)
+        home ".bash_profile";
+        home ".bash_login";
+        home ".profile";
+        (* Bash loads .bashrc INSTEAD, for interactive NON login shells only;
+           but it's often included from the above.
+           We may include our variables in both to be sure ; for now we rely
+           on non-login shells inheriting their env from a login shell
+           somewhere... *)
+      ]
+    with Not_found ->
+      (* iff none of the above exist, creating this should be safe *)
+      home ".bash_profile"
 
   let guess_dot_profile shell =
     let home f =
@@ -952,30 +1130,23 @@ module OpamSys = struct
       with Not_found -> f in
     match shell with
     | SH_fish ->
-      List.fold_left Filename.concat (home ".config") ["fish"; "config.fish"]
-    | SH_zsh  -> home ".zshrc"
+      Some (List.fold_left Filename.concat (home ".config") ["fish"; "config.fish"])
+    | SH_zsh  ->
+      let zsh_home f =
+        try Filename.concat (Env.get "ZDOTDIR") f
+        with Not_found -> home f in
+      Some (zsh_home ".zshrc")
     | SH_bash ->
-      (try
-         List.find Sys.file_exists [
-           (* Bash looks up these 3 files in order and only loads the first,
-              for LOGIN shells *)
-           home ".bash_profile";
-           home ".bash_login";
-           home ".profile";
-           (* Bash loads .bashrc INSTEAD, for interactive NON login shells only;
-              but it's often included from the above.
-              We may include our variables in both to be sure ; for now we rely
-              on non-login shells inheriting their env from a login shell
-              somewhere... *)
-         ]
-       with Not_found ->
-         (* iff none of the above exist, creating this should be safe *)
-         home ".bash_profile")
+      Some (home ".bashrc")
     | SH_csh ->
       let cshrc = home ".cshrc" in
       let tcshrc = home ".tcshrc" in
-      if Sys.file_exists cshrc then cshrc else tcshrc
-    | SH_sh -> home ".profile"
+      Some (if Sys.file_exists cshrc then cshrc else tcshrc)
+    | SH_pwsh _ ->
+      None
+    | SH_sh -> Some (home ".profile")
+    | SH_cmd ->
+      None
 
 
   let registered_at_exit = ref []
@@ -987,44 +1158,172 @@ module OpamSys = struct
       (fun f -> try f () with _ -> ())
       !registered_at_exit
 
-  let is_cygwin_variant =
+  let env_var env var =
+    let len = Array.length env in
+    let f = if Sys.win32 then String.uppercase_ascii else fun x -> x in
+    let prefix = f var^"=" in
+    let pfxlen = String.length prefix in
+    let rec aux i =
+      if (i : int) >= len then "" else
+      let s = env.(i) in
+      if OpamCompat.String.starts_with ~prefix (f s) then
+        String.sub s pfxlen (String.length s - pfxlen)
+      else aux (i+1)
+    in
+    aux 0
+
+  let is_external_cmd name =
+    let forward_to_back =
+      if Sys.win32 then
+        String.map (function '/' -> '\\' | c -> c)
+      else
+        fun x -> x
+    in
+    let name = forward_to_back name in
+    String.contains name Filename.dir_sep.[0]
+
+  let resolve_in_path_t env name =
+    if not (Filename.is_relative name) || is_external_cmd name then
+      invalid_arg "OpamStd.Sys.resolve_in_path: bare command expected"
+    else
+    let path = split_path_variable (env_var env "PATH") in
+    List.filter_map (fun path ->
+        let candidate = Filename.concat path name in
+        (* TODO: use Sys.is_regular_file once opam requires OCaml >= 5.1 *)
+        match Sys.is_directory candidate with
+        | false -> Some candidate
+        | true | exception (Sys_error _) -> None)
+      path
+
+  (* OCaml 4.05.0 no longer follows the updated PATH to resolve commands. This
+     makes unqualified commands absolute as a workaround. *)
+  let resolve_command =
+    let resolve ?dir env name =
+      if not (Filename.is_relative name) then begin
+        (* absolute path *)
+        if not (Sys.file_exists name) then `Not_found
+        else if not (OpamStubs.is_executable name) then `Denied
+        else `Cmd name
+      end else if is_external_cmd name then begin
+        (* relative path *)
+        let cmd = match dir with
+          | None -> name
+          | Some d -> Filename.concat d name
+        in
+        if not (Sys.file_exists cmd) then `Not_found
+        else if not (OpamStubs.is_executable cmd) then `Denied
+        else `Cmd cmd
+      end else
+      (* bare command, lookup in PATH *)
+      let name =
+        if Sys.win32 && not (Filename.check_suffix name ".exe") then
+          name ^ ".exe"
+        else name
+      in
+      let possibles = resolve_in_path_t env name in
+      (* Following the shell sematics for looking up PATH, programs with the
+         expected name but not the right permissions are skipped silently.
+         Therefore, only two outcomes are possible in that case, [`Cmd ..] or
+         [`Not_found]. *)
+      match List.find OpamStubs.is_executable possibles with
+      | cmdname -> `Cmd cmdname
+      | exception Not_found ->
+        if possibles = [] then
+          `Not_found
+        else
+          `Denied
+    in
+    fun ?env ?dir name ->
+      let env = match env with None -> Env.raw_env () | Some e -> e in
+      resolve env ?dir name
+
+  let resolve_in_path ?env name =
+    let env = match env with None -> Env.raw_env () | Some e -> e in
+    match resolve_in_path_t env name with
+    | result::_ -> Some result
+    | [] -> None
+
+  let get_windows_executable_variant =
     if Sys.win32 then
       let results = Hashtbl.create 17 in
-      let requires_cygwin name =
-        let cmd = Printf.sprintf "cygcheck \"%s\"" name in
-        let ((c, _, _) as process) = Unix.open_process_full cmd (Unix.environment ()) in
-        let rec f a =
-          match input_line c with
-          | x ->
-              if OpamString.ends_with ~suffix:"cygwin1.dll" (String.trim x) then
-                if OpamString.starts_with ~prefix:"  " x then
-                  f `Cygwin
-                else if a <> `Cygwin then
-                  f `CygLinked
-                else
-                  f a
-              else
-                f a
-          | exception e ->
-              Unix.close_process_full process |> ignore;
-              fatal e;
-              a
+      let requires_cygwin cygcheck name =
+        let env =
+          Env.cyg_env ~env:(Env.raw_env ()) ~cygbin:(Filename.dirname cygcheck)
+            ~git_location:None
         in
-        f `Native
+        let cmd = Filename.quote_command cygcheck [name] in
+        let ((c, _, _) as process) = Unix.open_process_full cmd env in
+        let rec check_dll platform =
+          match input_line c with
+          | dll ->
+            (* Guard against any risk of stray \r characters *)
+            let tdll = String.trim dll in
+            if OpamCompat.String.ends_with ~suffix:"cygwin1.dll" tdll then
+              if OpamCompat.String.starts_with ~prefix:"  " dll then
+                check_dll `Cygwin
+              else if platform = `Native then
+                check_dll (`Tainted `Cygwin)
+              else
+                check_dll platform
+            else if OpamCompat.String.ends_with ~suffix:"msys-2.0.dll" tdll then
+              if OpamCompat.String.starts_with ~prefix:"  " dll then
+                check_dll `Msys2
+              else if platform = `Native then
+                check_dll (`Tainted `Msys2)
+              else
+                check_dll platform
+            else
+              check_dll platform
+          | exception e ->
+            let _ : Unix.process_status = Unix.close_process_full process in
+            fatal e;
+            platform
+        in
+        check_dll `Native
       in
-      fun name ->
-        if Filename.is_relative name then
-          requires_cygwin name
-        else
-          try
-            Hashtbl.find results name
-          with Not_found ->
-            let result = requires_cygwin name
-            in
-              Hashtbl.add results name result;
+      fun ?search_in_first name ->
+        let cygcheck =
+          let open Option.Op in
+          let contains_cygcheck dir =
+            let cygcheck = Filename.concat dir "cygcheck.exe" in
+            if Sys.file_exists cygcheck then
+              Some cygcheck
+            else
+              None
+          in
+          search_in_first >>= contains_cygcheck
+          >>+ fun () ->
+            (* ~search_in_first not supplied, or cygcheck.exe not found in it;
+               now try general PATH-resolution. *)
+            match resolve_command "cygcheck.exe" with
+            | `Cmd cmd -> Some cmd
+            | `Not_found | `Denied -> None
+        in
+        match cygcheck with
+        | None -> `Native
+        | Some cygcheck ->
+          if Filename.is_relative name then
+            requires_cygwin cygcheck name
+          else
+            try Hashtbl.find results (cygcheck, name)
+            with Not_found ->
+              let result = requires_cygwin cygcheck name in
+              Hashtbl.add results (cygcheck, name) result;
               result
     else
-      fun _ -> `Native
+    fun ?search_in_first:_ _ -> `Native
+
+  let get_cygwin_variant ?search_in_first cmd =
+    (* Treat MSYS2's variant of `cygwin1.dll` called `msys-2.0.dll` equivalently.
+       Confer https://www.msys2.org/wiki/How-does-MSYS2-differ-from-Cygwin/ *)
+    match get_windows_executable_variant ?search_in_first cmd with
+    | `Native -> `Native
+    | `Cygwin
+    | `Msys2 -> `Cygwin
+    | `Tainted _ -> `CygLinked
+
+  let is_cygwin_variant ?search_in_first cmd =
+    get_cygwin_variant ?search_in_first cmd = `Cygwin
 
   exception Exit of int
   exception Exec of string * string array * string array
@@ -1061,7 +1360,7 @@ module OpamSys = struct
     `User_interrupt, 130;
   ]
 
-  let get_exit_code reason = List.assoc reason exit_codes
+  let get_exit_code reason = OpamList.assoc OpamCompare.equal reason exit_codes
 
   let exit_because reason = exit (get_exit_code reason)
 
@@ -1074,6 +1373,15 @@ module OpamSys = struct
       if !called then invalid_arg "Just what do you think you're doing, Dave?";
       called := true;
       console := printer
+
+  let is_valid_basename_char =
+    if Sys.win32 then
+      function
+      | '\000'..'\031'
+      | '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' -> false
+      | _ -> true
+    else
+      fun c -> c <> '\000' && c <> '/'
 end
 
 
@@ -1101,47 +1409,58 @@ module Win32 = struct
   end
 
   let (set_parent_pid, parent_putenv) =
-    let ppid = ref (lazy (OpamStubs.(getCurrentProcessID () |> getParentProcessID))) in
+    let ppid = ref (OpamCompat.Lazy.map (function (_::(pid, _)::_) -> pid | _ -> 0l) OpamSys.windows_process_ancestry) in
     let parent_putenv = lazy (
-      let ppid = Lazy.force !ppid in
-      if OpamStubs.isWoW64 () <> OpamStubs.isWoW64Process ppid then
-        (*
-         * Expect to see opam-putenv.exe in the same directory as opam.exe,
-         * rather than PATH (allow for crazy users like developers who may have
-         * both builds of opam)
-         *)
-        let putenv_exe =
-          Filename.(concat (dirname Sys.executable_name) "opam-putenv.exe")
+      let {contents = lazy ppid} = ppid in
+      let our_architecture = OpamStubs.getProcessArchitecture None in
+      let their_architecture = OpamStubs.getProcessArchitecture (Some ppid) in
+      let no_opam_putenv =
+        let warning = lazy (
+          !console.warning "opam-putenv was not found - \
+                            OPAM is unable to alter environment variables";
+          false)
         in
-        let ctrl = ref stdout in
-        let quit_putenv () =
-          if !ctrl <> stdout then
-            let () = Printf.fprintf !ctrl "::QUIT\n%!" in
-            ctrl := stdout
-        in
-        at_exit quit_putenv;
-        if Sys.file_exists putenv_exe then
-          fun key value ->
-            if !ctrl = stdout then begin
-              let (inCh, outCh) = Unix.pipe () in
-              let _ =
-                Unix.create_process putenv_exe
-                                    [| putenv_exe; Int32.to_string ppid |]
-                                    inCh Unix.stdout Unix.stderr
-              in
-              ctrl := (Unix.out_channel_of_descr outCh);
-              set_binary_mode_out !ctrl true;
-            end;
-            Printf.fprintf !ctrl "%s\n%s\n%!" key value;
-            if key = "::QUIT" then ctrl := stdout;
-            true
-        else
-          let warning = lazy (
-            !console.warning "opam-putenv was not found - \
-                              OPAM is unable to alter environment variables";
-            false)
+        fun _ _ -> Lazy.force warning
+      in
+      if our_architecture <> their_architecture then
+        match their_architecture with
+        | OpamStubs.ARM | ARM64 | IA64 | Unknown ->
+          (* ARM support not yet implemented - just ensure we don't inject Intel
+             code into an ARM process! *)
+          no_opam_putenv
+        | AMD64 | Intel ->
+          (*
+           * Expect to see opam-putenv.exe in the same directory as opam.exe,
+           * rather than PATH (allow for crazy users like developers who may have
+           * both builds of opam)
+           *)
+          let putenv_exe =
+            Filename.(concat (dirname Sys.executable_name) "opam-putenv.exe")
           in
-          fun _ _ -> Lazy.force warning
+          let ctrl = ref stdout in
+          let quit_putenv () =
+            if !ctrl <> stdout then
+              let () = Printf.fprintf !ctrl "::QUIT\n%!" in
+              ctrl := stdout
+          in
+          at_exit quit_putenv;
+          if Sys.file_exists putenv_exe then
+            fun key value ->
+              if !ctrl = stdout then begin
+                let (inCh, outCh) = Unix.pipe () in
+                let _ =
+                  Unix.create_process putenv_exe
+                                      [| putenv_exe; Int32.to_string ppid |]
+                                      inCh Unix.stdout Unix.stderr
+                in
+                ctrl := (Unix.out_channel_of_descr outCh);
+                set_binary_mode_out !ctrl true;
+              end;
+              Printf.fprintf !ctrl "%s\n%s\n%!" key value;
+              if key = "::QUIT" then ctrl := stdout;
+              true
+          else
+            no_opam_putenv
       else
         function "::QUIT" -> fun _ -> true
         | key -> OpamStubs.process_putenv ppid key)
@@ -1156,15 +1475,17 @@ module Win32 = struct
     (* Update our environment *)
     Unix.putenv "HOME" dir;
     (* Update our parent's environment *)
-    ignore (parent_putenv "HOME" dir);
+    let _ : bool = parent_putenv "HOME" dir in
     (* Persist the value to the user's environment *)
     OpamStubs.(writeRegistry HKEY_CURRENT_USER "Environment" "HOME" REG_SZ dir);
     (* Broadcast the change (or a reboot would be required) *)
     (* These constants are defined in WinUser.h *)
     let hWND_BROADCAST = 0xffffn in
     let sMTO_ABORTIFHUNG = 0x2 in
-    OpamStubs.(sendMessageTimeout hWND_BROADCAST 5000 sMTO_ABORTIFHUNG
-                                  WM_SETTINGCHANGE 0 "Environment") |> ignore
+    let _ : int * int =
+      OpamStubs.(sendMessageTimeout hWND_BROADCAST 5000 sMTO_ABORTIFHUNG
+                   WM_SETTINGCHANGE 0 "Environment")
+    in ()
 end
 
 
@@ -1309,7 +1630,7 @@ module OpamFormat = struct
     | []    -> ""
     | [a]   -> a
     | [a;b] -> Printf.sprintf "%s %s %s" a last b
-    | h::t  -> Printf.sprintf "%s, %s" h (pretty_list t)
+    | h::t  -> Printf.sprintf "%s, %s" h (pretty_list ~last t)
 
   let as_aligned_table ?(width=OpamSys.terminal_columns ()) l =
     let itlen =
@@ -1370,10 +1691,6 @@ end
 
 module Op = struct
 
-  let (@@) f x = f x
-
-  let (|>) x f = f x
-
   let (@*) g f x = g (f x)
 
   let (@>) f g x = g (f x)
@@ -1402,9 +1719,11 @@ module Config = struct
 
   type when_ = [ `Always | `Never | `Auto ]
   type when_ext = [ `Extended | when_ ]
+  type answer = [ `unsafe_yes | `all_yes | `all_no | `ask ]
+  type yes_answer = [ `unsafe_yes | `all_yes ]
 
   let env conv var =
-    try Option.map conv (Env.getopt ("OPAM"^var))
+    try Stdlib.Option.map conv (Env.getopt ("OPAM"^var))
     with Failure _ ->
       flush stdout;
       !console.warning
@@ -1417,11 +1736,12 @@ module Config = struct
     | "1" | "yes" | "true" -> Some true
     | _ -> None
 
-  let env_bool var =
-    env (fun s -> match bool_of_string s with
-        | Some s -> s
-        | None -> failwith "env_bool")
-      var
+  let bool s =
+    match bool_of_string s with
+    | Some s -> s
+    | None -> failwith "env_bool"
+
+  let env_bool var = env bool var
 
   let env_int var = env int_of_string var
 
@@ -1430,8 +1750,8 @@ module Config = struct
     env (function s ->
         if s = "" then 0 else
         match bool_of_string s with
-        | Some true -> 0
-        | Some false -> 1
+        | Some true -> 1
+        | Some false -> 0
         | None -> int_of_string s)
       var
 
@@ -1454,6 +1774,9 @@ module Config = struct
 
   let env_string var =
     env (fun s -> s) var
+
+  let env_string_list var =
+    env (fun s -> OpamString.split s ',') var
 
   let env_float var =
     env float_of_string var
@@ -1479,22 +1802,51 @@ module Config = struct
     | `Never -> false
     | `Auto -> Lazy.force auto
 
+  let answer s =
+    match String.lowercase_ascii s with
+    | "ask" -> `ask
+    | "yes" -> `all_yes
+    | "no" -> `all_no
+    | "unsafe-yes" -> `unsafe_yes
+    | _ -> failwith "env_answer"
+
+  let env_answer =
+    env (fun s ->
+        try if bool s then `all_yes else `all_no
+        with Failure _ -> answer s)
+
+  let auto_answer =
+    env (fun s ->
+        List.filter_map (fun s ->
+            match OpamString.cut_at s '=' with
+            | Some (k, x) ->
+              (match answer x with
+               | x -> Some (k, x)
+               | exception Failure _ -> None)
+            | None -> None)
+        (String.split_on_char ':' s))
+
+
   module E = struct
     type t = ..
+    type t += REMOVED
     let (r : t list ref) = ref []
 
     let update v = r := v :: !r
     let updates l = r := l @ !r
 
     let find var = OpamList.find_map var !r
+    let value_t var = try Some (find var) with Not_found -> None
     let value var =
-      let l = lazy (try Some (find var); with Not_found -> None) in
+      let l = lazy (value_t var) in
       fun () -> Lazy.force l
   end
 
 end
 
 module List = OpamList
+module Char = OpamChar
 module String = OpamString
 module Sys = OpamSys
 module Format = OpamFormat
+module Compare = OpamCompare

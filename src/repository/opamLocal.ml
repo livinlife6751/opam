@@ -10,7 +10,6 @@
 (**************************************************************************)
 
 open OpamTypes
-open OpamTypesBase
 open OpamProcess.Job.Op
 
 let log fmt = OpamConsole.log "RSYNC" fmt
@@ -61,9 +60,9 @@ let rsync ?(args=[]) ?(exclude_vcdirs=true) src dst =
   let remote = String.contains src ':' in
   let overlap src dst =
     let norm d = Filename.concat d "" in
-    OpamStd.String.starts_with ~prefix:(norm src) (norm dst) &&
+    OpamCompat.String.starts_with ~prefix:(norm src) (norm dst) &&
     not (OpamStd.String.contains ~sub:OpamSwitch.external_dirname (norm dst)) ||
-    OpamStd.String.starts_with ~prefix:(norm dst) (norm src)
+    OpamCompat.String.starts_with ~prefix:(norm dst) (norm src)
   in
   (* See also [OpamVCS.sync_dirty] *)
   let exclude_args =
@@ -88,7 +87,7 @@ let rsync ?(args=[]) ?(exclude_vcdirs=true) src dst =
   else (
     OpamSystem.mkdir dst;
     let convert_path = Lazy.force convert_path in
-    call_rsync (fun () -> not (OpamSystem.dir_is_empty dst))
+    call_rsync (fun () -> OpamSystem.dir_is_empty dst = Some false)
       ( rsync_arg :: args @ exclude_args @
         [ "--delete"; "--delete-excluded"; convert_path src; convert_path dst; ])
     @@| function
@@ -110,9 +109,9 @@ let rsync_dirs ?args ?exclude_vcdirs url dst =
   rsync ?args ?exclude_vcdirs src_s dst_s @@| function
   | Not_available _ as na -> na
   | Result _ ->
-    if OpamFilename.exists_dir dst then Result dst
+    if OpamFilename.exists_dir dst then Result ()
     else Not_available (None, dst_s)
-  | Up_to_date _ -> Up_to_date dst
+  | Up_to_date _ -> Up_to_date ()
 
 let rsync_file ?(args=[]) url dst =
   let src_s = url.OpamUrl.path in
@@ -121,7 +120,7 @@ let rsync_file ?(args=[]) url dst =
   if not (is_remote url || OpamFilename.(exists (of_string src_s))) then
     Done (Not_available (None, src_s))
   else if src_s = dst_s then
-    Done (Up_to_date dst)
+    Done (Up_to_date ())
   else
     (OpamFilename.mkdir (OpamFilename.dirname dst);
      let convert_path = Lazy.force convert_path in
@@ -129,9 +128,9 @@ let rsync_file ?(args=[]) url dst =
        ( rsync_arg :: args @ [ convert_path src_s; convert_path dst_s ])
      @@| function
      | None -> Not_available (None, src_s)
-     | Some [] -> Up_to_date dst
+     | Some [] -> Up_to_date ()
      | Some [_] ->
-       if OpamFilename.exists dst then Result dst
+       if OpamFilename.exists dst then Result ()
        else Not_available (None, src_s)
      | Some l ->
        OpamSystem.internal_error
@@ -147,60 +146,71 @@ module B = struct
 
   let fetch_repo_update repo_name ?cache_dir:_ repo_root url =
     log "pull-repo-update";
-    let quarantine =
-      OpamFilename.Dir.(of_string (to_string repo_root ^ ".new"))
+    let quarantine = OpamRepositoryRoot.quarantine repo_root in
+    let finalise () = OpamRepositoryRoot.remove quarantine in
+    let populate_quarantine () =
+      match repo_root, quarantine with
+      | OpamRepositoryRoot.Tgz _, OpamRepositoryRoot.Tgz quarantine ->
+        (let to_archive dir =
+           OpamRepositoryRoot.make_tar_gz quarantine
+             (OpamRepositoryRoot.Dir.of_dir dir);
+           Done (Result ())
+         in
+         match OpamUrl.local_dir url with
+         | Some dir -> to_archive dir
+         | None ->
+           OpamFilename.with_tmp_dir_job @@ fun dir ->
+           pull_dir_quiet dir url @@+ function
+           | Result () -> to_archive dir
+           | exn -> Done exn)
+      | OpamRepositoryRoot.Dir dir, OpamRepositoryRoot.Dir quarantine ->
+        (match OpamUrl.local_dir url with
+         | Some dir ->
+           let dir = OpamRepositoryRoot.Dir.of_dir dir in
+           OpamRepositoryRoot.Dir.copy_except_vcs ~src:dir ~dst:quarantine;
+           (* fixme: Would be best to symlink, but at the moment our filename api
+              isn't able to cope properly with the symlinks afterwards
+              OpamFilename.link_dir ~target:dir ~link:quarantine; *)
+           Done (Result ())
+         | None ->
+           if OpamRepositoryRoot.Dir.exists dir then
+             OpamRepositoryRoot.Dir.copy_except_vcs ~src:dir ~dst:quarantine
+           else
+             OpamRepositoryRoot.Dir.make_empty quarantine;
+           pull_dir_quiet (OpamRepositoryRoot.Dir.to_dir quarantine) url)
+      (* we have the guarantee that repo root and quarantine have the same kind *)
+      | _, _ -> assert false
     in
-    let finalise () = OpamFilename.rmdir quarantine in
     OpamProcess.Job.catch (fun e ->
         finalise ();
-        Done (OpamRepositoryBackend.Update_err e))
-    @@ fun () ->
+        Done (OpamRepositoryBackend.Update_err e)) @@ fun () ->
     OpamRepositoryBackend.job_text repo_name "sync"
-      (match OpamUrl.local_dir url with
-       | Some dir ->
-         OpamFilename.copy_dir ~src:dir ~dst:quarantine;
-         (* fixme: Would be best to symlink, but at the moment our filename api
-            isn't able to cope properly with the symlinks afterwards
-            OpamFilename.link_dir ~target:dir ~link:quarantine; *)
-         Done (Result quarantine)
-       | None ->
-         if OpamFilename.exists_dir repo_root then
-           OpamFilename.copy_dir ~src:repo_root ~dst:quarantine
-         else
-           OpamFilename.mkdir quarantine;
-         pull_dir_quiet quarantine url) @@+ function
-    | Not_available _ ->
+      (populate_quarantine ()) @@| function
+    | Not_available (_, msg) ->
       finalise ();
-      Done (OpamRepositoryBackend.Update_err (Failure "rsync failed"))
-    | Up_to_date _ ->
-      finalise (); Done OpamRepositoryBackend.Update_empty
-    | Result _ ->
-      if not (OpamFilename.exists_dir repo_root) ||
-         OpamFilename.dir_is_empty repo_root then
-        Done (OpamRepositoryBackend.Update_full quarantine)
+      OpamRepositoryBackend.Update_err (Failure ("rsync error: " ^ msg))
+    | Up_to_date () ->
+      finalise ();  OpamRepositoryBackend.Update_empty
+    | Result () ->
+      if OpamRepositoryRoot.is_empty repo_root <> Some false then
+        OpamRepositoryBackend.Update_full quarantine
       else
-        OpamProcess.Job.finally finalise @@ fun () ->
-        OpamRepositoryBackend.job_text repo_name "diff" @@
-        OpamRepositoryBackend.get_diff
-          (OpamFilename.dirname_dir repo_root)
-          (OpamFilename.basename_dir repo_root)
-          (OpamFilename.basename_dir quarantine)
-        @@| function
-        | None -> OpamRepositoryBackend.Update_empty
+        OpamStd.Exn.finally finalise @@ fun () ->
+        OpamRepositoryBackend.get_diff repo_root quarantine
+        |> function
+        | None ->  OpamRepositoryBackend.Update_empty
         | Some p -> OpamRepositoryBackend.Update_patch p
 
   let repo_update_complete _ _ = Done ()
 
-  let pull_url ?cache_dir:_ ?subpath local_dirname _checksum remote_url =
-    let local_dirname =
-      OpamStd.Option.map_default (fun x -> OpamFilename.Op.(local_dirname / x))
-        local_dirname subpath
-    in
+  let pull_url ?full_fetch:_ ?cache_dir:_ ?subpath local_dirname _checksum remote_url =
+    let local_dirname = OpamFilename.SubPath.(local_dirname /? subpath) in
     OpamFilename.mkdir local_dirname;
     let dir = OpamFilename.Dir.to_string local_dirname in
     let remote_url =
-      OpamStd.Option.map_default (fun x -> OpamUrl.Op.(remote_url / x))
-        remote_url subpath
+      if OpamSystem.is_archive remote_url.OpamUrl.path then remote_url else
+        OpamStd.Option.map_default (fun x -> OpamUrl.Op.(remote_url / OpamFilename.SubPath.to_string x))
+          remote_url subpath
     in
     let remote_url =
       match OpamUrl.local_dir remote_url with

@@ -7,7 +7,8 @@ let gen_topic target_basename dline t =
                 \  (deps using-built-opam)\n\
                 \  (action (progn (with-stderr-to %s-%s.err\n\
                 \                   (with-stdout-to %s-%s.1 (run %s %s --help=groff)))\n\
-                \                 (diff %s-%s.err %%{dep:%s-%s.0}))))\n\
+                \                 (diff %s-%s.err %%{dep:%s-%s.0})))\n\
+                \  (package opam))\n\
                 "
     target_basename t target_basename t target_basename t target_basename t target_basename t dline t target_basename t target_basename t
 
@@ -37,5 +38,5 @@ let () =
                 \  (section man)\n\
                 \  (package opam)\n\
                 \  (files%s))\n"
-    (String.concat " "
+    (String.concat ""
        (List.map (Printf.sprintf "\n    %s-%s.1" target_basename) topics))

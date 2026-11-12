@@ -1,160 +1,181 @@
 Working version changelog, used as a base for the changelog and the release
 note.
-Possibly scripts breaking changes are prefixed with ✘.
-New option/command/subcommand are prefixed with ◈.
+Prefixes used to help generate release notes, changes, and blog posts:
+* ✘ Possibly scripts breaking changes
+* ◈ New option/command/subcommand
+* [BUG] for bug fixes
+* [NEW] for new features (not a command itself)
+* [API] api updates 🕮
+If there is changes in the API (new non optional argument, function renamed or
+moved, etc.), please update the _API updates_ part (it helps opam library
+users)
 
 ## Version
-  *
+  * Bump version to `2.7.0~alpha1~dev` [#7064 @kit-ty-kate]
 
 ## Global CLI
-  * Add default cli mechanism: deprecated options are accepted (in the major version) if no cli is specified [#4575 @rjbou]
-  * Add `opam config` deprecated subcommands in the default cli  [#4575 @rjbou - fix #4503]
-  * Add cli versioning for opam environment variables [#4606 @rjbou]
-  * Deprecated `build-doc`, `build-test`, `make` [#4581 @rjbou]
-  * Add cli versioning for enums of flags with predefined enums [#4606 @rjbou]
-  * Ensure the symlink for a plugin is maintained on each invocation [#4621 @dra27 - partially fixes #4619]
+
+## Plugins
 
 ## Init
-  * Introduce a `default-invariant` config field, restore the 2.0 semantics for
-    `default-compiler` [#4607 @AltGr]
 
 ## Config report
-  * Fix `Not_found` (config file) error [#4570 @rjbou]
-  * Print variables of installed compilers and their (installed) dependencies [#4570 @rjbou]
+
+## Actions
 
 ## Install
-  * Don't patch twice [#4529 @rjbou]
-  * With `--deps-only`, set dependencies as root packages [#4964 @rjbou - fix #4502]
-  * Keep global lock only if root format upgrade is performed [#4612 @rjbou - fix #4597]
-  * Improve installation times by only tracking files listed in `.install` instead of the whole switch prefix when there are no `install:` instructions (and no preinstall commands) [#4494 @kit-ty-kate @rjbou - fix #4422]
+
+  * Fix a bug triggering unnecessary reinstallation of packages not directly involved in the solution [#7154 @NathanReb]
+  * Fix a bug where `opam install --depext-only` would try to install depexts of packages that needed to be removed or upgraded [#7166, @NathanReb]
+
+## Build (package)
 
 ## Remove
-  *
+
+## UI
+  * Improve the way unhandled exceptions are displayed during interactive questions [#7138 @kit-ty-kate]
+  * Stop showing the "Running as root" warning on Haiku [#7138 @kit-ty-kate]
+  * Work around bugs/quirks in Haiku's implementation of termios [#7138 @kit-ty-kate]
+  * On command-line failures, usages are now displayed at the end [#6867 @WardBrian]
 
 ## Switch
-  * Don't exclude base packages from rebuilds (made some sense in opam 2.0
-    with base packages but doesn't make sense with 2.1 switch invariants) [#4569 @dra27]
-  * Don't refer to base packages in messages any more [#4623 @dra27 - fixes #4572]
+
+## Config
 
 ## Pin
-  * Don't look for lock files for pin depends [#4511 @rjbou - fix #4505]
-  * Fetch sources when pinning an already pinned package with a different url when using working directory [#4542 @rjbou - fix #4484]
-  * Don't ask for confirmation for pinning base packages (similarly makes no
-    sense with 2.1 switch invariants) [#4571 @dra27]
-  * Fix version pin source retrieving: mustn't error if archive opam file is malformed [#4580 @rjbou]
 
 ## List
-  * --silent renamed to --check [#4595 @dra27 - fix #4323]
 
 ## Show
-  * Include doc field in opam-show [#4567 @dra27 - partially fix #4565]
 
-## Var
-  *
+## Var/Option
 
-## Option
-  *
+## Update / Upgrade
+
+## Tree
+
+## Exec
+
+## Source
 
 ## Lint
-  * fix W59 & E60 with conf flag handling (no url required) [#4550 @rjbou - fix #4549]
+
+## Repository
 
 ## Lock
-  * Don't write lock file with `--read-only', `--safe`, and `--dryrun` [#4562 @rjbou - fix #4320]
-  * Make consistent with `opam install`, on local pin always take last opam file even if uncomitted [#4562 @rjbou - fix #4320]
+
+## Clean
+
+## Env
 
 ## Opamfile
-  * Fix `features` parser [#4507 @rjbou]
-  * Rename `hidden-version` to `avoid-version` [#4527 @dra27]
-  * Fix rewrtiting with preserved format empty field error [#4633 @rjbou - fix #4628]
 
 ## External dependencies
-  * Handle macport variants [#4509 @rjbou - fix #4297]
-  * Always upgrade all the installed packages when installing a new package on Archlinux [#4556 @kit-ty-kate]
-  * Handle some additional environment variables (`OPAMASSUMEDEPEXTS`, `OPAMNODEPEXTS`) [#4587 @AltGr]
-  * Improve messages to hint that answering `no` doesn't abort installation [@AltGr]
-  * Improve messages to hint that answering `no` doesn't abort installation [#4591 @AltGr]
+  * Fix the depexts installation on `opam install --deps` when the system packages already exist in a repository [#7158 @kit-ty-kate - fix #7153]
+
+## Format upgrade
 
 ## Sandbox
-  * Fix the conflict with the environment variable name used by dune [#4535 @smorimoto - fix ocaml/dune#4166]
-  * Kill builds on Ctrl-C with bubblewrap [#4530 @kit-ty-kate - fix #4400]
-  * Linux: mount existing TMPDIR read-only, re-bind `$TMPDIR` to a separate tmpfs [#4589 @AltGr]
-  * Fix the sandbox check [#4589 @AltGr]
-  * Fix sandbox script shell mistake that made `PWD` read-write on remove actions [#4589 @AltGr]
-  * Port bwrap improvements to sandbox_exec [#4589 @AltGr]
-  * Fix realpath use for macos, partial revert of #4589 [#4609 @AltGr]
-
-## Repository management
-  *
 
 ## VCS
-  *
+  * Add support for using git repositories owned by another local user [#6980 @kit-ty-kate - fix #6963]
+  * Use `/dev/null` on both Unix and Windows when setting `GIT_CONFIG_*` (NUL is not accepted in Git-for-Windows 2.56.0.windows.1) [#7085 @kit-ty-kate]
 
 ## Build
-  * Fix opam-devel's tests on platforms without openssl, GNU-diff and a system-wide ocaml [#4500 @kit-ty-kate]
-  * Use dune to run reftests [#4376 @emillon]
-  * Restrict `extlib` and `dose` version [#4517 @kit-ty-kate]
-  * Restrict to opam-file-format 2.1.2 [#4495 @rjbou]
-  * Switch to newer version of MCCS (based on newer GLPK) for src_ext [#4559 @AltGr]
-  * Bump dune version to 2.8.2 [#4592 @AltGr]
-  * Bump the minimal dune requirement to dune 1.11 [#4437 @dra27 @kit-ty-kate]
-  * 4.12 compatibility [#4437 @dra27 @kit-ty-kate]
-  * Cold compiler updated to 4.12 [#4616 @dra27]
+  * Upgrade the autoconf generated files (`configure`) to autoconf 2.72 [#7052 @kit-ty-kate]
+  * Upgrade to cudf 0.11\~rc1 [#7145 @kit-ty-kate]
+  * Upgrade to checkseum 0.5.4 [#7172 @kit-ty-kate]
+  * Upgrade to decompress 1.6.1 [#7172 @kit-ty-kate]
 
 ## Infrastructure
-  * Release scripts: switch to OCaml 4.10.2 by default, add macos/arm64 builds by default [#4559 @AltGr]
-  * Release script: add default cli version check on full archive build [#4575 @rjbou]
+
+## Release scripts
+  * Make x86\_32 binaries take full advantage of i686 [#7120 @kit-ty-kate]
+  * Ensure arm32 binaries are really armhf as advertised instead of armv7 [#7120 @kit-ty-kate]
+  * Enhance the release documentation with mentions of macOS 27 and IRC [#7194 @kit-ty-kate]
+
+## Install script
+  * Add opam 2.6.0\~rc1 to the install scripts [#7135 @kit-ty-kate]
+  * Add opam 2.6.0 to the install scripts [#7150 @kit-ty-kate]
+  * Add opam 2.6.1 to the install scripts [#7193 @kit-ty-kate]
 
 ## Admin
-  *
 
 ## Opam installer
-  *
 
 ## State
-  *
 
-# Opam file format
-  *
+## Opam file format
 
 ## Solver
-  * Fix Cudf preprocessing [#4534 #4627 @AltGr - fix #4624]
-  * Allow to upgrade to a hidden-version package if a hidden-version package is already installed [#4525 @kit-ty-kate]
-  * Add support for a few select criteria useful to CI to the 0install solver: `+count[version-lag,solution]` to always choose the oldest version available, `+removed` to not try to keep installed packages [#4631 @kit-ty-kate]
 
 ## Client
-  * ✘ Environment variables initialised only at opam client launch, no more via libraries [#4606 @rjbou]
-
-## Internal
-  * Generalise `mk_tristate_opt` to `mk_state_opt` [#4575 @rjbou]
-  * Fix `mk_state_opt` and rename to `mk_enum_opt` [#4626 @rjbou]
-  * Fix `opam exec` on native Windows when calling cygwin executables [#4588 @AltGr]
-  * Fix temporary file with a too long name causing errors on Windows [#4590 @AltGr]
-  * CLI: Add flag deprecation and replacement helper [#4595 @rjbou]
-  * Win32 Console: fix VT100 support [#3897 @dra27]
-  * Tidied the opam files [#4620 @dra27]
-  * Externalise cli versioning tools from `OpamArg` into `OpamArgTools` [#4606 @rjbou]
-  * Each library defines its own environment variables, that fills the config record [#4606 @rjbou]
-  * Harden cygpath wrapper [#4625 @dra27]
-
-## Test
-  * Make the reference tests dune-friendly [#4376 @emillon]
-  * Rewrite the very old tests and unify them with the newer ones [#4504 @AltGr]
-  * Add patch an substitution tests [#4545 @rjbou]
-  * Fix configure check in github actions [#4593 @rjbou]
-  * GHA: Add default cli check in hygiene job [#4575 @rjbou]
-  * GHA: Fix opam-rt on macos, set ocaml-system as switch compiler [#4610 @dra27 @rjbou]
-  * GHA: Ignore opam-rt pin depends, opam libs are already pinned locally [#4610 @AltGr @rjbou]
-  * GHA: The bootstrap cache also depends on the precise version! [#4618 @dra27]
-  * GHA: fix opam-rt specific PR branch use [#4606 @rjbou]
-  * Add switch creation tests: (dead)locking and switch defitinion at action time [#4612 @rjbou]
-  * Remove debug information from reftest [#4612 @rjbou]
-  * Add preserved format test [#4633 @rjbou]
 
 ## Shell
-  *
+
+## Internal
+  * Remove unecessary set union operations `packages ++ installed` since `installed` is included in `packages` [#7148 @NathanReb]
+  * Rewrite inefficient package set <-> map operations [#7159 @NathanReb]
+  * Remove unnecessary set operations in `OpamSwitchSate.universe` [#7154 @NathanReb]
+  * Bump opam-root-version from 2.6\~alpha to 2.6 [#7151 @kit-ty-kate @rjbou]
+  * Deduplicate some depexts related code in `OpamSwitchState` [#7157 @kit-ty-kate]
+  * Avoid redundant comparison during `opam switch list-available` [#7200 @kit-ty-kate]
+  * Remove dead code in `OpamSwitchState.unavailable_reason_raw` [#7206 @NathanReb]
+  * The vendor script for `opam-core.cmdliner` was upgraded to vendor cmdliner 2.1.1 [#6867 @BrianWard @kit-ty-kate]
+  * The vendor cmdliner was patched to always allow legacy prefixes (1.x behaviour) [#6867 @BrianWard]
+  * The vendor cmdliner was patched to allow newlines in `Error` (1.x behaviour) [#6867 @kit-ty-kate]
+
+## Internal: Unix
+  * Add explicit support for Haiku [#7138 @kit-ty-kate]
+
+## Internal: Windows
+
+## Test
+
+## Benchmarks
+
+## Reftests
+### Tests
+  * Add an exhaustive test showing the behaviour of the `conflicts` field [#7127 @kit-ty-kate]
+  * Add more depexts related tests to the testsuite (pins, autopins, deps-only, …) [#7158 @kit-ty-kate @rjbou]
+  * Add reftests for unavailability reason on unsolvable request in `unavailable-reason.test` [#7206 @NathanReb]
+  * Cleanup leftovers from dual cmdliner 1.0 and 1.1 support [#7216 @kit-ty-kate]
+
+### Engine
+
+## Github Actions
+  * The Hygiene workflow has been upgraded to Ubuntu 26.04 [#7052 @kit-ty-kate]
+  * auto-cancel unreachable jobs in PRs [#7147 @kit-ty-kate]
+  * Always start CI runs by an `apt update` [#7156 @kit-ty-kate]
+  * Update the opam-repository SHA to the latest commit [#7145 @kit-ty-kate]
+  * Add a test showing opam using a git repository owned by root [#6980 @kit-ty-kate]
+  * Bump the opam version used to 2.6.1 [#7151 #7194 @kit-ty-kate @rjbou]
 
 ## Doc
-  * Install page: add OSX arm64 [#4506 @eth-arm]
-  * Document the default build environment variables [#4496 @kit-ty-kate]
-  * Remove useless span tag in manual [#4513 @dannywillems]
-  * Fix typo [#4637 @UnixJunkie]
+  * Update the documentation about the latest opam release [#7150 #7194 @kit-ty-kate]
+  * Document the Git environment variables in the FAQ [#7187 @kit-ty-kate @MisterDA - fix #7152]
+  * Fix link to bubblewrap repository [#7237 @halbaroth]
+
+## Security fixes
+
+# API updates
+## opam-client
+
+## opam-repository
+  * `OpamGit`: git calls now will all carry git config `safe.directory=.` (current directory) [#6980 @kit-ty-kate - fix #6963]
+
+## opam-state
+  * `OpamSwitchState.update_sys_packages` (new in 2.6.0) was removed in favour of the already existing `update_package_metadata` or `update_pin` functions [#7158 @kit-ty-kate]
+
+## opam-solver
+
+## opam-format
+
+## opam-core
+  * `OpamCmdliner` was upgraded to version 2.1.1 [#6867 @BrianWard @kit-ty-kate]
+  * `OpamStd.Env.Name.{equal,compare}`: Improve the performance [#7086 @kit-ty-kate]
+  * `OpamConsole.{pause,confirm,menu}`: Fix a deadlock on some rare platforms [#7138 @kit-ty-kate]
+  * `OpamStd.Map.update`: was changed to the stdlib version which has a more flexible API and has better performances [#7130 @NathanReb - fix #4915]
+  * `OpamStd.Map.union`: was changed to the stdlib version which has a more flexible API and has better performances [#7170, @NathanReb]
+  * `OpamStd.Map.strict_union`: added as a replacement for the previous custom `union` API in `OpamStd` but based on `Stdlib`'s `union` for better performances [#7170, @NathanReb]
+  * `OpamStd.String.case_insensitive_{compare,equal}` were added [#7086 @kit-ty-kate]

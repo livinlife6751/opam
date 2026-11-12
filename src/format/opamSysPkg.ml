@@ -15,12 +15,13 @@ type t = string
 let of_string s = s
 let to_string s = s
 let compare = OpamStd.String.compare_case
+let equal s r = compare s r = 0
 
 let to_json s =
   `O [ ("sys_package", `String s) ]
 let of_json = function
   | `O dict ->
-    (match List.assoc "sys_package" dict with
+    (match OpamStd.List.assoc String.equal "sys_package" dict with
      | `String s -> Some (of_string s)
      | _ -> None
      | exception Not_found -> None)
@@ -43,6 +44,8 @@ let raw_set set =
   OpamStd.String.Set.fold (fun spkg set-> Set.add (of_string spkg) set)
     set Set.empty
 
+(** System package status *)
+
 type status =
   {
     s_available : Set.t;
@@ -63,3 +66,36 @@ let string_of_status sp =
   Printf.sprintf "available: %s; not_found: %s"
     (Set.to_string sp.s_available)
     (Set.to_string sp.s_not_found)
+
+(* System package availability *)
+type availability_mode =
+  | Available of Set.t
+  | Suppose_available
+
+let equal_availability_mode a b =
+  match a, b with
+  | Available os, Available ns -> Set.equal os ns
+  | Suppose_available, Suppose_available -> true
+  | Available _, _
+  | Suppose_available, _ -> false
+
+
+(** System packages to install *)
+
+type to_install = {
+  ti_new : Set.t;
+  (** Package to install required by new opam packages *)
+
+  ti_required : Set.t
+  (** Package to install required by already install opam packages *)
+}
+
+let to_install_empty = {
+  ti_new  = Set.empty;
+  ti_required  = Set.empty;
+}
+
+let string_of_to_install ti =
+  Printf.sprintf "new: %s; required: %s"
+    (Set.to_string ti.ti_new)
+    (Set.to_string ti.ti_required)

@@ -12,7 +12,6 @@
 open OpamParserTypes.FullPos
 open OpamTypes
 open OpamTypesBase
-open OpamStd.Op
 open OpamPp
 open OpamPp.Op
 
@@ -24,8 +23,8 @@ let values_pos = function
   | [] -> None
   | x::_ -> Some (value_pos x)
 
-let optelem = OpamStd.Option.map (fun x -> x.pelem)
-let nullposelem = OpamStd.Option.map nullify_pos
+let optelem = Option.map (fun x -> x.pelem)
+let nullposelem = Option.map nullify_pos
 
 (** low-level Pps for the Lines parser ([string list list]) *)
 
@@ -508,19 +507,25 @@ module V = struct
       List.rev_append (ors_to_list f) (rev_ors_to_list e)
     | x -> [x]
 
-  let package_formula_items kind constraints =
+  let formula_items ~name kind ?only atom constraints =
     let split, join = match kind with
       | `Conj -> ands_to_list, OpamFormula.ands
       | `Disj -> ors_to_list, OpamFormula.ors
     in
+    let keep = match only with
+      | None -> fun _ -> true
+      | Some `And -> fun x -> not (OpamStd.Compare.equal `Or x)
+      | Some `Or -> fun x -> not (OpamStd.Compare.equal `And x)
+    in
+    let pp_atom = map_option atom constraints in
     let rec parse_formula ~pos:_ l =
       let rec aux v = match v.pelem with
         | String _ | Option (_,_) ->
-          Atom (parse (package_atom constraints) ~pos:v.pos v)
+          Atom (parse pp_atom ~pos:v.pos v)
         | Group g -> Block (parse_formula ~pos:v.pos g.pelem)
-        | Logop ({ pelem = `Or; _}, e1, e2) ->
+        | Logop ({ pelem = `Or; _}, e1, e2) when keep `Or ->
           let left = aux e1 in Or (left, aux e2)
-        | Logop ({ pelem = `And; _}, e1, e2) ->
+        | Logop ({ pelem = `And; _}, e1, e2) when keep `And  ->
           let left = aux e1 in And (left, aux e2)
         | _ -> unexpected ~pos:(value_pos v) ()
       in
@@ -537,35 +542,79 @@ module V = struct
         | Empty -> assert false
         | Block f ->
           nullify_pos @@ Group (nullify_pos @@ print_formula ~inner:true f)
-        | And (e,f) ->
+        | And (e,f) when keep `And ->
           group_if @@ nullify_pos @@
           Logop (nullify_pos `And, aux ~in_and:true e, aux ~in_and:true f)
-        | Or (e,f) ->
+        | Or (e,f) when keep `Or ->
           group_if ~cond:in_and @@ nullify_pos @@
           Logop (nullify_pos `Or, aux e, aux f)
-        | Atom at -> group_if (print (package_atom constraints) at)
+        | Atom at -> group_if (print pp_atom at)
+        | _ -> unexpected ()
       in
       let fl = if inner then [f] else split f in
       List.map (aux ~in_and:false) fl
     in
-    pp ~name:"pkg-formula" parse_formula print_formula
+    pp ~name parse_formula print_formula
+
+  let package_formula_items kind constraints =
+    formula_items ~name:"pkg-formula" kind pkgname constraints
 
   let package_formula kind constraints =
     list -| package_formula_items kind constraints
 
-  let env_binding =
-    let parse ~pos:_ v = match v.pelem with
-      | Relop ({ pelem = `Eq;_}, { pelem = Ident i;_}, { pelem = String s;_}) ->
-        i, OpamParserTypes.Eq, s, None
-      | Env_binding ({ pelem = Ident i; _}, op, { pelem = String s; _}) ->
-        i, op.pelem, s, None
+  let path_format =
+    let parse ~pos:_ v =
+      match v.pelem with
+      | String "host" -> Host
+      | String "target" -> Target
+      | String "target-quoted" -> Target_quoted
+      | String "host-quoted" -> Host_quoted
       | _ -> unexpected ()
     in
-    let print (id, op, str, _) =
+    let print ht =
+      nullify_pos (String (OpamTypesBase.string_of_path_format ht))
+    in
+    pp ~name:"path-format" parse print
+
+  let separator =
+    let parse ~pos:_ v =
+      match v.pelem with
+      | String ":" -> SColon
+      | String ";" -> SSemiColon
+      | _ -> unexpected ()
+    in
+    let print sep =
+      nullify_pos (String (String.make 1 (OpamTypesBase.char_of_separator sep)))
+    in
+    pp ~name:"separator" parse print
+
+  let env_binding_t empty =
+    let parse ~pos:_ v = match v.pelem with
+      | Relop ({ pelem = `Eq;_}, { pelem = Ident i;_}, { pelem = String s;_}) ->
+        { envu_var = i; envu_op = Eq;
+          envu_value = s; envu_comment = None;
+          envu_rewrite = Some empty;
+        }
+      | Env_binding ({ pelem = Ident i; _}, op, { pelem = String s; _}) ->
+        { envu_var = i; envu_op = op_of_raw op.pelem;
+          envu_value = s; envu_comment = None;
+          envu_rewrite = Some empty;
+        }
+      | _ -> unexpected ()
+    in
+    let print { envu_var; envu_op; envu_value; envu_comment = _ ;
+                envu_rewrite = _} =
       nullify_pos @@
-      Env_binding (print ident id, nullify_pos op, print string str)
+      Env_binding (print ident envu_var, nullify_pos (raw_of_op envu_op),
+                   print string envu_value)
     in
     list -| singleton -| pp ~name:"env-binding" parse print
+
+  let env_binding =
+    env_binding_t (SPF_Resolved None)
+
+  let env_binding_unresolved =
+    env_binding_t (SPF_Unresolved (Empty, Empty))
 
   (* Only used by the deprecated "os" field *)
   let os_constraint =
@@ -671,14 +720,15 @@ module I = struct
           let of_json = function
             | `O dict ->
               begin try
-                  match List.assoc "kind" dict with
+                  match OpamStd.List.assoc String.equal "kind" dict with
                   | `String s ->
                     begin
                       let o =
-                        if not (List.mem_assoc "name" dict) then None
-                        else match List.assoc "name" dict with
-                          | `String s -> Some s
-                          | _ -> raise Not_found
+                        if not (OpamStd.List.mem_assoc String.equal
+                                  "name" dict) then None else
+                        match OpamStd.List.assoc String.equal "name" dict with
+                        | `String s -> Some s
+                        | _ -> raise Not_found
                       in Some (s, o)
                     end
                   | _ -> raise Not_found
@@ -695,7 +745,7 @@ module I = struct
                let k = sec.section_kind.pelem in
                let v = sec.section_items.pelem in
                let n = optelem sec.section_name in
-               if List.mem_assoc k sections then
+               if OpamStd.List.mem_assoc String.equal k sections then
                  try
                    errs,
                    SEM.safe_add (k, n) (pos,v) section_map, field_map
@@ -709,7 +759,7 @@ module I = struct
                let k = k.pelem in
                let v = v.pelem in
                let pos = it.pos in
-               if List.mem_assoc k ppas then
+               if OpamStd.List.mem_assoc String.equal k ppas then
                  try
                    errs,
                    section_map, OpamStd.String.Map.safe_add k (pos,v) field_map
@@ -730,7 +780,7 @@ module I = struct
                | Bad_format (pos, msg) ->
                  (field, (pos, msg)) :: errs, acc
              with Not_found ->
-               (if List.mem field mandatory_fields
+               (if OpamStd.List.mem String.equal field mandatory_fields
                 then (field, (Some pos, "Missing field "^field)) :: errs
                 else errs),
                acc)
@@ -755,7 +805,7 @@ module I = struct
       r, errs
     in
     let print (acc, _) =
-      OpamStd.List.filter_map
+      List.filter_map
         (fun (field,ppa) ->
            match snd (ppa.print acc) with
            | None | Some ({ pelem = List { pelem = []; _}; _}
@@ -824,7 +874,7 @@ module I = struct
     pp
       (fun ~pos items ->
          match
-           OpamStd.List.filter_map (fun v -> match v.pelem with
+           List.filter_map (fun v -> match v.pelem with
                | Variable (k,v) when k.pelem = name -> Some v
                | _ -> None)
              items
@@ -850,7 +900,7 @@ module I = struct
       ()
     =
     let name = "opam-version" in
-    let opam_v = V.string -| of_module "opam-version" (module OpamVersion) in
+    let opam_v = V.string -| of_module name (module OpamVersion) in
     let f v =
       OpamFormatConfig.(!r.skip_version_checks) || match v with
       | Some v -> f v
@@ -862,12 +912,41 @@ module I = struct
         (OpamVersion.to_string format_version)
     in
     field name (parse opam_v) -|
-    map_fst (check ~name ~errmsg f) -|
-    pp
+    map_fst (check ~name ~raise:OpamPp.bad_version ~errmsg f) -|
+    pp ~name
       (fun ~pos:_ (_,x) -> x)
       (fun x ->
-         (* re-extract the field using parse when printing, to check *)
-         parse ~pos:pos_null (field name (parse opam_v)) x)
+         (* re-extract the field using parse when printing, to check that it is
+            not undefined *)
+         match parse ~pos:pos_null (field name (parse opam_v)) x with
+         | None, _ -> failwith "opam version must be printed"
+         | v, l -> v, l)
+
+  let opam_version ?(undefined=false) ~format_version () =
+    let name = "opam-version" in
+    pp
+      (fun ~pos:_ items ->
+         if not undefined then items else
+           List.filter (function
+               | { pelem = Variable ({ pelem = fname; _},
+                                     { pelem = String _version; _}); _}
+                 when fname = name ->
+                 (* check opam version already called, we don't need to check
+                    that it is the same version *)
+                 false
+               | _ -> true) items)
+      (fun items ->
+         let opam_v = V.string -| of_module name (module OpamVersion) in
+         match parse ~pos:pos_null (field name (parse opam_v)) items with
+         | None, items ->
+           let opam_v =
+             nullify_pos @@
+             Variable (nullify_pos name,
+                       nullify_pos @@
+                       String (OpamVersion.to_string format_version))
+           in
+           opam_v :: items
+         | Some _, items -> items)
 
   type signature = string * string * string
 

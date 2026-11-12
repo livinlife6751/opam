@@ -9,8 +9,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
-
 (* Global configuration *)
 
 let debug () = abs OpamCoreConfig.(!r.debug_level) > 0
@@ -40,6 +38,12 @@ let disp_status_line () =
   | `Auto -> OpamStd.Sys.tty_out && (color () || not (Lazy.force dumb_term))
 
 let utf8, utf8_extended =
+  let use_auto_utf8_extended = lazy (
+    match OpamStd.Sys.os () with
+    | Darwin -> true
+    | Win32 -> OpamStubs.getConsoleWindowClass () <> Some "ConsoleWindowClass"
+    | _ -> false
+  ) in
   let auto = lazy (
     if Sys.win32 then
       let attempt handle =
@@ -65,7 +69,7 @@ let utf8, utf8_extended =
           false
     else
       let checkv v =
-        try Some (OpamStd.String.ends_with ~suffix:"UTF-8" (OpamStd.Env.get v))
+        try Some (OpamCompat.String.ends_with ~suffix:"UTF-8" (OpamStd.Env.get v))
         with Not_found -> None
       in
       OpamStd.Option.Op.(checkv "LC_ALL" ++ checkv "LANG" +! false)
@@ -75,9 +79,9 @@ let utf8, utf8_extended =
      | `Never -> false
      | `Auto -> Lazy.force auto),
   (fun () -> match OpamCoreConfig.(!r.utf8) with
-     | `Extended -> not Sys.win32
+     | `Extended -> true
      | `Always | `Never -> false
-     | `Auto -> Lazy.force auto && OpamStd.Sys.(os () = Darwin))
+     | `Auto -> Lazy.force auto && Lazy.force use_auto_utf8_extended)
 
 module Symbols = struct
   let rightwards_arrow = Uchar.of_int 0x2192
@@ -86,6 +90,7 @@ module Symbols = struct
   let box_drawings_light_vertical = Uchar.of_int 0x2502
   let box_drawings_light_up_and_right = Uchar.of_int 0x2514
   let box_drawings_light_right = Uchar.of_int 0x2576
+  let box_drawings_light_vertical_and_right = Uchar.of_int 0x251C
   let circled_division_slash = Uchar.of_int 0x2298
   let asterisk_operator = Uchar.of_int 0x2217
   let north_east_arrow = Uchar.of_int 0x2197
@@ -100,6 +105,7 @@ module Symbols = struct
   let downwards_double_arrow = Uchar.of_int 0x21d3
   let black_down_pointing_triangle = Uchar.of_int 0x25bc
   let downwards_black_arrow = Uchar.of_int 0x2b07
+  let collision = Uchar.of_int 0x1f4a5
 end
 
 type win32_glyph_checker = {
@@ -123,7 +129,7 @@ let utf8_symbol main ?(alternates=[]) s =
   if utf8 () then
     try
       let scalar =
-        if Sys.win32 then
+        if Sys.win32 && not (utf8_extended ()) then
           let current_font =
             let open OpamStubs in
             try
@@ -187,7 +193,7 @@ type text_style =
   [ `bold
   | `underline
   | `crossed
-  | `black
+  | `gray
   | `red
   | `green
   | `yellow
@@ -200,7 +206,7 @@ let style_code (c: text_style) = match c with
   | `bold      -> "01"
   | `underline -> "04"
   | `crossed   -> "09"
-  | `black     -> "30"
+  | `gray      -> "90"
   | `red       -> "31"
   | `green     -> "32"
   | `yellow    -> "33"
@@ -236,41 +242,49 @@ let acolor_w width c f s =
 type win32_color_mode = Shim | VT100 of (unit -> unit)
 
 type _ shim_return =
- | Handle : (OpamStubs.handle * win32_color_mode) shim_return
+ | Handle : (OpamStubs.stdhandle * win32_color_mode) shim_return
  | Mode   : win32_color_mode shim_return
  | Peek   : bool shim_return
 
-let force_win32_vt100 hConsoleOutput () =
-  let mode = OpamStubs.getConsoleMode hConsoleOutput in
-  (* ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4 *)
-  let vt100_on = 0x4 in
-  if mode land vt100_on = 0 then
-    OpamStubs.setConsoleMode hConsoleOutput (mode lor vt100_on) |> ignore
+let force_win32_vt100 handle () =
+  try
+    let hConsoleOutput = OpamStubs.getStdHandle handle in
+    let mode = OpamStubs.getConsoleMode hConsoleOutput in
+    (* ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4 *)
+    let vt100_on = 0x4 in
+    if mode land vt100_on = 0 then
+      let _ : bool =
+        OpamStubs.setConsoleMode hConsoleOutput (mode lor vt100_on)
+      in ()
+  with Not_found -> ()
 
 let enable_win32_vt100 ch =
-  let hConsoleOutput =
-    OpamStubs.getStdHandle ch
-  in
   try
+    let hConsoleOutput = OpamStubs.getStdHandle ch in
     let mode = OpamStubs.getConsoleMode hConsoleOutput in
     (* ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4 *)
     let vt100_on = 0x4 in
     if mode land vt100_on <> 0 then
-      (hConsoleOutput, VT100(force_win32_vt100 hConsoleOutput))
+      (ch, VT100(force_win32_vt100 ch))
     else
       if OpamStubs.setConsoleMode hConsoleOutput (mode lor vt100_on) then begin
         let restore_console () =
-          let mode =
-            OpamStubs.getConsoleMode hConsoleOutput land (lnot vt100_on)
-          in
-          OpamStubs.setConsoleMode hConsoleOutput mode |> ignore
+          try
+            let hConsoleOutput = OpamStubs.getStdHandle ch in
+            let mode =
+              OpamStubs.getConsoleMode hConsoleOutput land (lnot vt100_on)
+            in
+            let _ : bool =
+              OpamStubs.setConsoleMode hConsoleOutput mode
+            in ()
+          with Not_found -> ()
         in
         at_exit restore_console;
-        (hConsoleOutput, VT100(force_win32_vt100 hConsoleOutput))
+        (ch, VT100(force_win32_vt100 ch))
       end else
-        (hConsoleOutput, Shim)
+        (ch, Shim)
   with Not_found ->
-    (hConsoleOutput, VT100 ignore)
+    (ch, VT100 (fun () -> ()))
 
 let stdout_state = lazy (enable_win32_vt100 OpamStubs.STD_OUTPUT_HANDLE)
 let stderr_state = lazy (enable_win32_vt100 OpamStubs.STD_ERROR_HANDLE)
@@ -324,13 +338,14 @@ let win32_print_message ch msg =
   if get_win32_console_shim ch Peek then
     Printf.fprintf ocaml_ch "%s%!" msg
   else
-    let (hConsoleOutput, mode) = get_win32_console_shim ch Handle in
+    let (ch, mode) = get_win32_console_shim ch Handle in
     match mode with
     | VT100 force ->
       force ();
       output_string ocaml_ch msg;
       flush ocaml_ch
     | Shim ->
+      let hConsoleOutput = OpamStubs.getStdHandle ch in
       let {OpamStubs.attributes; _} =
         OpamStubs.getConsoleScreenBufferInfo hConsoleOutput
       in
@@ -428,19 +443,21 @@ let carriage_delete_unix _ =
   print_string "\r\027[K"
 
 let carriage_delete_windows () =
-  let (hConsoleOutput, mode) = get_win32_console_shim `stdout Handle in
-  match mode with
-  | Shim ->
+  match get_win32_console_shim `stdout Handle with
+  | (ch, Shim) ->
+      let hConsoleOutput = OpamStubs.getStdHandle ch in
       let {OpamStubs.size = (w, _); cursorPosition = (_, row); _} =
         OpamStubs.getConsoleScreenBufferInfo hConsoleOutput in
       Printf.printf "\r%!";
-      OpamStubs.fillConsoleOutputCharacter hConsoleOutput '\000' w (0, row)
-        |> ignore
-  | VT100 force ->
-      force ();
-      carriage_delete_unix ()
+      let _ : bool =
+        OpamStubs.fillConsoleOutputCharacter hConsoleOutput '\000' w (0, row)
+      in ()
+  | (_, VT100 force) ->
+    force ();
+    carriage_delete_unix ()
 
 let carriage_delete =
+  if not OpamStd.Sys.tty_out then fun () -> () else
   if Sys.win32 then
     let carriage_delete = lazy (
       match get_win32_console_shim `stdout Mode with
@@ -454,6 +471,12 @@ let carriage_delete =
     fun () -> Lazy.force carriage_delete ()
   else
     carriage_delete_unix
+
+let rollback_terminal nlines =
+  for _ = 1 to nlines do
+    carriage_delete ();
+    Printf.printf "\027[A"
+  done
 
 let displaying_status = ref false
 
@@ -503,12 +526,9 @@ let print_message =
 
 let timestamp () =
   let time = Unix.gettimeofday () -. global_start_time in
-  let tm = Unix.gmtime time in
-  let msec = time -. (floor time) in
-  Printf.ksprintf (colorise `blue) "%.2d:%.2d.%.3d"
-    (tm.Unix.tm_hour * 60 + tm.Unix.tm_min)
-    tm.Unix.tm_sec
-    (int_of_float (1000.0 *. msec))
+  Printf.ksprintf (colorise `blue) "%02.0f:%06.3f"
+    (Float.floor (time /. 60.))
+    (mod_float time 60.)
 
 let log_formatter, finalise_output =
   if Sys.win32 then
@@ -519,7 +539,7 @@ let log_formatter, finalise_output =
     in
       Format.formatter_of_buffer b, f
   else
-    Format.formatter_of_out_channel stderr, ignore
+    Format.formatter_of_out_channel stderr, fun _ -> ()
 
 let () =
   Format.pp_set_margin log_formatter 0
@@ -547,7 +567,7 @@ let log section ?(level=1) fmt =
       | None -> debug_level
       | exception Not_found -> 0
   in
-  if not OpamCoreConfig.(!r.set) then
+  if not OpamCoreConfig.(!r.set) && OpamCoreConfig.(!r.in_opam) then
     let b = Buffer.create 128 in
     let timestamp = timestamp () ^ "  " in
     let k _ = Queue.push (level, timestamp, Buffer.contents b) pending in
@@ -585,7 +605,13 @@ let note fmt =
       (OpamStd.Format.reformat ~start_column:7 ~indent:7 str)
   ) fmt
 
+let formatted_msg_aux ~indent out fmt =
+  Printf.ksprintf
+    (fun s -> print_message out "%s" (OpamStd.Format.reformat ?indent s))
+    fmt
+
 let errmsg fmt = print_message `stderr fmt
+let formatted_errmsg ?indent fmt = formatted_msg_aux ~indent `stderr fmt
 
 let error_and_exit reason fmt =
   Printf.ksprintf (fun str ->
@@ -594,11 +620,7 @@ let error_and_exit reason fmt =
   ) fmt
 
 let msg fmt = print_message `stdout fmt
-
-let formatted_msg ?indent fmt =
-  Printf.ksprintf
-    (fun s -> print_message `stdout "%s" (OpamStd.Format.reformat ?indent s))
-    fmt
+let formatted_msg ?indent fmt = formatted_msg_aux ~indent `stdout fmt
 
 let last_status = ref ""
 
@@ -655,14 +677,14 @@ let header_msg fmt =
       let wpad = header_width () - String.length str - 2 in
       let wpadl = 4 in
       let wpadr = wpad - wpadl - if utf8_extended () then 4 else 0 in
-      print_message `stdout "\n%s %s %s%s\n"
+      print_message `stdout "\n%s %s%s%s\n"
         (colorise `cyan (String.sub padding 0 wpadl))
         (colorise `bold str)
         (if wpadr > 0 then
            let padding =
              String.sub padding (String.length padding - wpadr) wpadr
            in
-           colorise `cyan padding
+           " " ^ colorise `cyan padding
          else
            "")
         (if wpadr >= 0 && utf8_extended () then
@@ -694,71 +716,167 @@ let header_error fmt =
         ) fmt
     ) fmt
 
+(* Some platforms such as Haiku do support termios but have specific quirks.
+   This record is here to abstract over functions needing special care. *)
+type termios_support = {
 
-let confirm ?(default=true) fmt =
-  Printf.ksprintf (fun s ->
-      try
-        if OpamCoreConfig.(!r.safe_mode) then false else
-        let prompt () =
-          formatted_msg "%s [%s] " s (if default then "Y/n" else "y/N")
-        in
-        if OpamCoreConfig.(!r.answer) = Some true then
-          (prompt (); msg "y\n"; true)
-        else if OpamCoreConfig.(!r.answer) = Some false ||
-                OpamStd.Sys.(not tty_in)
-        then
-          (prompt (); msg "n\n"; false)
-        else if OpamStd.Sys.(not tty_out || os () = Win32 || os () = Cygwin) then
-          let rec loop () =
-            prompt ();
-            match String.lowercase_ascii (read_line ()) with
-            | "y" | "yes" -> true
-            | "n" | "no" -> false
-            | "" -> default
-            | _  -> loop ()
-          in loop ()
-        else
-        let open Unix in
+  (* Does the OS support termios *)
+  os_supports_termios : bool;
+
+  (* Wrapper around Unix.tcflush *)
+  tcflush : Unix.file_descr -> Unix.flush_queue -> unit;
+
+  (* Wrapper around Unix.tcsetattr {attr with c_echonl=true} if required.
+     On some platforms (Haiku), their current interpretation of POSIX.1 is that
+     ECHONL is required even if ECHO is set, however the POSIX.1-2024 standard
+     says:
+
+     > If ECHONL and ICANON are set, the <newline> character shall be echoed
+     > even if ECHO is not set.
+
+     The interpretation of most Unix systems is that if ECHO is set,
+     ECHONL should not be needed.
+
+     Thus we wrap an extra Unix.tcsetattr with c_echonl=true of the platforms
+     and situations that need it.
+
+     See https://dev.haiku-os.org/ticket/20343 *)
+  echonl : 'a. (unit -> 'a) -> 'a;
+}
+
+let tcsetattr ~tcflush ~cont set =
+  let attr = Unix.tcgetattr Unix.stdin in
+  let reset () =
+    Unix.tcsetattr Unix.stdin TCSAFLUSH attr;
+    tcflush Unix.stdin Unix.TCIFLUSH;
+  in
+  OpamStd.Exn.finally reset @@ fun () ->
+  Unix.tcsetattr Unix.stdin TCSAFLUSH (set attr);
+  tcflush Unix.stdin Unix.TCIFLUSH;
+  cont ()
+
+let termios_support = lazy begin
+  match OpamStd.Sys.os () with
+  | Linux | Darwin | FreeBSD | OpenBSD | NetBSD | DragonFly
+  | Unix | Other _ ->
+    let echonl f = f () in
+    {os_supports_termios = true; tcflush = Unix.tcflush; echonl}
+  | Win32 | Cygwin ->
+    let tcflush _ _ = () in
+    let echonl f = f () in
+    (* TODO: We do not know how to support these platforms at the moment *)
+    {os_supports_termios = false; tcflush; echonl}
+  | Haiku ->
+    (* TODO: Remove when https://dev.haiku-os.org/ticket/20341 is fixed *)
+    let tcflush _ _ = () in
+    (* TODO: Remove when https://dev.haiku-os.org/ticket/20343 is fixed *)
+    let echonl cont =
+      tcsetattr ~tcflush ~cont (fun attr -> {attr with c_echonl = true})
+    in
+    {os_supports_termios = true; tcflush; echonl}
+end
+
+(* Reads a single char from the user when possible, a line otherwise *)
+let short_user_input ~prompt ?default ?on_eof f =
+  let on_eof = OpamStd.Option.Op.(on_eof ++ default) in
+  let prompt () = print_string prompt; flush stdout in
+  try
+    let {os_supports_termios; tcflush; echonl} = Lazy.force termios_support in
+    let is_not_interactive =
+      not OpamStd.Sys.tty_out || not os_supports_termios || Lazy.force dumb_term
+    in
+    if is_not_interactive then
+      let rec loop () =
         prompt ();
-        let buf = Bytes.create 1 in
-        let rec loop () =
-          let ans =
-            try
-              if read stdin buf 0 1 = 0 then raise End_of_file
-              else Some (Char.lowercase_ascii (Bytes.get buf 0))
-            with
-            | Unix.Unix_error (Unix.EINTR,_,_) -> None
-            | Unix.Unix_error _ -> raise End_of_file
-          in
-          match ans with
-          | Some 'y' -> print_endline (Bytes.to_string buf); true
-          | Some 'n' -> print_endline (Bytes.to_string buf); false
-          | Some '\n' -> print_endline (if default then "y" else "n"); default
-          | _ -> loop ()
+        let input = match String.lowercase_ascii (read_line ()) with
+          | "" -> default
+          | s -> Some s
         in
-        let attr = tcgetattr stdin in
-        let reset () =
-          tcsetattr stdin TCSAFLUSH attr;
-          tcflush stdin TCIFLUSH;
-        in
-        try
-          tcsetattr stdin TCSAFLUSH
-            {attr with c_icanon = false; c_echo = false};
-          tcflush stdin TCIFLUSH;
-          let r = loop () in
-          reset ();
-          r
-        with e -> reset (); raise e
-      with
-      | Unix.Unix_error _ | End_of_file ->
-        msg "%s\n" (if default then "y" else "n"); default
-      | Sys.Break as e -> msg "\n"; raise e
-    ) fmt
+        match OpamStd.Option.Op.(input >>= f) with
+        | Some a -> a
+        | None -> loop ()
+      in
+      echonl loop
+    else
+    let () = prompt () in
+    let buf = Bytes.create 3 in
+    let rec loop () =
+      let input =
+        match
+          (* Some keystrokes, e.g. arrows, can return 3 chars *)
+          let nr = Unix.read Unix.stdin buf 0 3 in
+          if nr < 1 then raise End_of_file
+          else String.uncapitalize_ascii (Bytes.sub_string buf 0 nr)
+        with
+        | "\n" -> default
+        | s -> Some s
+        | exception Unix.Unix_error (Unix.EINTR,_,_) -> None
+      in
+      match input with
+      | None -> loop ()
+      | Some i -> match f i with
+        | Some a when String.length i > 0 && i.[0] = '\027' ->
+          print_newline (); a
+        | Some a -> print_endline i; a
+        | None -> loop ()
+    in
+    tcsetattr ~tcflush ~cont:loop @@ fun attr ->
+    {attr with c_vmin = 1; c_icanon = false; c_echo = false}
+  with
+  | End_of_file ->
+    begin match on_eof with
+    | None -> OpamStd.Exn.finalise End_of_file (fun () -> msg "\n")
+    | Some d ->
+      msg "%s\n" d;
+      match f d with
+      | Some a -> a
+      | None -> assert false
+    end
+  | e -> OpamStd.Exn.finalise e (fun () -> msg "\n")
+
+let pause fmt =
+  if OpamStd.Sys.tty_in then
+    Printf.ksprintf (fun s ->
+        let prompt = OpamStd.Format.reformat s in
+        short_user_input ~prompt ~default:""
+        (function
+        | "\027" -> print_newline (); OpamStd.Sys.exit_because `Aborted
+        | _ -> Some ()))
+      fmt
+  else
+    Printf.ifprintf () fmt
+
+let confirm ?(require_unsafe_yes=false) ?(default=true) ?name fmt =
+  Printf.ksprintf (fun s ->
+      if OpamCoreConfig.(!r.safe_mode) then false else
+      let prompt =
+        Printf.ksprintf OpamStd.Format.reformat "%s [%s/%s] " s
+          (colorise `blue (if default then "Y" else "y"))
+          (colorise `blue (if default then "n" else "N"))
+      in
+      if OpamCoreConfig.answer_is ~name `unsafe_yes ||
+         not require_unsafe_yes && OpamCoreConfig.answer_is_yes ~name ()
+      then
+        (formatted_msg "%sy\n" prompt; true)
+      else if OpamCoreConfig.answer_is ~name `all_no ||
+              OpamStd.Sys.(not tty_in)
+      then
+        (formatted_msg "%sn\n" prompt; false)
+      else
+        short_user_input ~prompt ~default:(if default then "y" else "n")
+        (function
+        | "y" | "yes" -> Some true
+        | "n" | "no" -> Some false
+        | "\027" -> Some false (* echap *)
+        | _  -> None))
+    fmt
 
 let read fmt =
   Printf.ksprintf (fun s ->
       formatted_msg "%s " s;
-      if OpamCoreConfig.(!r.answer = None && not !r.safe_mode) then (
+      if OpamCoreConfig.(answer_is ~name:None `ask && not !r.safe_mode) then (
+        let {echonl; _} = Lazy.force termios_support in
+        echonl @@ fun () ->
         try match read_line () with
           | "" -> None
           | s  -> Some s
@@ -886,6 +1004,166 @@ let print_table ?cut oc ~sep table =
       output_string str;
   in
   List.iter (fun l -> print_line (cleanup_trailing l)) table
+
+let menu ?default ?unsafe_yes ?yes ~no ~options fmt =
+  assert (List.length options < 36);
+  let options_nums =
+    let option_of_index n =
+      (* NOTE: 1..9 (starts at ASCII 49) & a..z (starts at ASCII 97) *)
+      (String.make 1 (char_of_int (if n < 9 then n+49 else (n-9)+97)))
+    in
+    List.mapi (fun n (ans, _) -> ans, option_of_index n) options
+  in
+  let nums_options = List.map (fun (a, n) -> n, a) options_nums in
+  let rec prev_option a0 = function
+    | (a,_)::[] -> a
+    | (a,_)::((a1,_)::_ as r) -> if a1 = a0 then a else prev_option a0 r
+    | [] -> assert false
+  in
+  let rec menu default =
+    let text =
+      OpamStd.List.concat_map "" ~right:"\n" (fun (ans, n) ->
+          Printf.ksprintf (OpamStd.Format.reformat ~indent:5) "%s %s. %s\n"
+            (if ans = default then ">" else " ")
+            (colorise `blue n)
+            (OpamStd.(List.assoc Compare.equal ans options)))
+        options_nums
+    in
+    let prompt =
+      Printf.sprintf "[%s] "
+        (OpamStd.List.concat_map "/" (fun (n, a) ->
+             colorise'
+               (`blue :: if a = default then [`underline] else [])
+               n)
+            nums_options)
+    in
+    let nlines = List.length Re.(all (compile (char '\n')) text) in
+    msg "%s" text;
+    let select a =
+      msg "%s\n" OpamStd.(List.assoc Compare.equal a options_nums); a
+    in
+    let default_s = OpamStd.(List.assoc Compare.equal default options_nums) in
+    let no_s = OpamStd.(List.assoc Compare.equal no options_nums) in
+    if OpamCoreConfig.(!r.safe_mode) then no else
+    match OpamCoreConfig.answer ~name:None (), unsafe_yes, yes with
+    | `unsafe_yes, Some a, _ -> print_string prompt; select a
+    | #OpamStd.Config.yes_answer, _, Some a -> print_string prompt; select a
+    | `all_no, _, _ -> print_string prompt; select no
+    | _, _, _ ->
+      let default_ref = ref default in
+      let change_selection =
+        fun opt ->
+          rollback_terminal nlines; (* restore cursor pos *)
+          default_ref := opt;
+          raise Exit
+      in
+      try
+        short_user_input ~prompt ~default:default_s ~on_eof:no_s @@ function
+        | "" -> None
+        | "\027" -> Some (select no) (* echap *)
+        | "\027[A" (* up *) | "\027[D" (* left *) ->
+          change_selection (prev_option default options)
+        | "\027[B" (* down *) | "\027[C" (* right *) ->
+          change_selection (prev_option default (List.rev options))
+        | i -> OpamStd.List.assoc_opt String.equal i nums_options
+      with Exit -> menu !default_ref
+  in
+  Printf.ksprintf (fun prompt_msg ->
+      formatted_msg "%s\n" prompt_msg;
+      let default = OpamStd.Option.default (fst (List.hd options)) default in
+      menu default
+    ) fmt
+
+
+(** Tree printing *)
+module Tree = struct
+
+  type 'elt t = {
+    value: 'elt;
+    children: 'elt t list
+  }
+
+  let value { value; _ } = value
+  let children { children; _ } = children
+
+  let create ?(children=[]) value = { value; children }
+
+  type symbols = {
+    vert: string; (** |  *)
+    hor:  string; (** -- *)
+    tee:  string; (** |- *)
+    hook: string; (** '- *)
+  }
+
+  let get_default_symbols () =
+    let vert = utf8_symbol Symbols.box_drawings_light_vertical "|" in
+    let hor  = utf8_symbol Symbols.box_drawings_light_horizontal "-" in
+    let tee  = utf8_symbol Symbols.box_drawings_light_vertical_and_right "|-" in
+    let hook = utf8_symbol Symbols.box_drawings_light_up_and_right "'-" in
+    { vert; hor; tee; hook }
+
+  let repeat count s =
+    let rec aux count acc =
+      if count < 1 then acc else aux (count -1) (acc ^ s)
+    in
+    aux count ""
+  let spaces count = String.init count (fun _ -> ' ')
+  let utf8_length s = Uutf.String.fold_utf_8 (fun state _ _ -> state+1) 0 s
+
+  let to_parts { vert; hor; tee; hook } =
+    let indent =
+      vert ^ spaces (4 - utf8_length vert)
+    in
+    let child =
+      let len = utf8_length tee in
+      tee ^ repeat (3 - len) hor ^ " "
+    in
+    let child_end =
+      let len = utf8_length hook in
+      hook ^ repeat (3 - len) hor ^ " "
+    in
+    (indent, child, child_end)
+
+  let print ?symbols ~printer { value; children } =
+    let symbols =
+      match symbols with
+      | Some x -> x
+      | None -> get_default_symbols ()
+    in
+    let indent, child, child_end = to_parts symbols in
+    let blank = spaces 4 in
+    let buff = Buffer.create 512 in
+    let rec go indents (is_end: bool) { value; children } =
+      let new_indents () =
+        if is_end then indents ^ blank
+        else indents ^ indent
+      in
+      match OpamStd.String.split (printer value) '\n' with
+      | [] -> go_children (new_indents ()) children
+      | first :: rest ->
+        Buffer.add_string buff indents;
+        Buffer.add_string buff (if is_end then child_end else child);
+        Buffer.add_string buff first;
+        Buffer.add_char buff '\n';
+        let indents = new_indents () in
+        List.iter (fun line ->
+            Buffer.add_string buff indents;
+            Buffer.add_string buff line;
+            Buffer.add_char buff '\n';
+          ) rest;
+        go_children indents children
+    and go_children indents children =
+      let child_end = List.length children - 1 in
+      List.iteri (fun i child ->
+          go indents (Int.equal i child_end) child)
+        children
+    in
+    Buffer.add_string buff (printer value);
+    Buffer.add_char buff '\n';
+    go_children "" children;
+    msg "%s" (Buffer.contents buff)
+
+end
 
 (* This allows OpamStd.Config.env to display warning messages *)
 let () =

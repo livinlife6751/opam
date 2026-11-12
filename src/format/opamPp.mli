@@ -22,9 +22,13 @@ type bad_format = pos option * string
     input does not have the right format. *)
 exception Bad_format of bad_format
 exception Bad_format_list of bad_format list
+exception Bad_version of bad_format * OpamVersion.t option
 
-(** Raise [Bad_format]. *)
+(** Raise exception {!Bad_format}. *)
 val bad_format: ?pos:pos -> ('a, unit, string, 'b) format4 -> 'a
+
+(** Raise exception {!Bad_version}. *)
+val bad_version: OpamVersion.t option -> ?pos:pos -> ('a, unit, string, 'b) format4 -> 'a
 
 val string_of_bad_format: ?file:string -> exn -> string
 
@@ -92,8 +96,14 @@ val identity : ('a, 'a) t
 val ignore : ('a, 'b option) t
 
 (** Identity pp, unless the check fails. The check is turned into an assertion
-    when printing *)
-val check : ?name:string -> ?errmsg:string -> ('a -> bool) -> ('a, 'a) t
+    when printing. If no [errmsg] is given, raises [Unexpected], otherwise
+    call [raise] with the given [errmsg]. By default [raise] raises
+    [Bad_format]. *)
+val check :
+  ?name:string ->
+  ?raise:('a -> ?pos:pos -> (string -> 'a, unit, string, 'a) format4
+          -> string -> 'a) ->
+  ?errmsg:string -> ('a -> bool) -> ('a, 'a) t
 
 val map_pair :
   ?name:string ->

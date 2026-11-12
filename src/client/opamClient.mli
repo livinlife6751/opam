@@ -28,8 +28,11 @@ val init:
   ?env_hook:bool ->
   ?completion:bool ->
   ?check_sandbox:bool ->
+  ?cygwin_setup: [ `internal of OpamSysPkg.t list | `default_location | `location of dirname | `no ] ->
+  ?git_location:(dirname, unit) either ->
+  ?no_compiler:bool ->
   shell ->
-  rw global_state * unlocked repos_state * atom list
+  rw global_state * unlocked repos_state * atom list option
 
 (* (\** Gets the initial config (opamrc) to be used *\)
  * val get_init_config:
@@ -38,12 +41,14 @@ val init:
  *   OpamFile.InitConfig.t *)
 
 (** Re-runs the extra tools checks, updates the configuration from [init_config]
-   (defaults to [OpamInitDefaults.init_config]) for the settings that are unset,
-   and updates all repositories *)
+   (defaults to {!OpamInitDefaults.init_config}) for the settings that are
+   unset, and updates all repositories *)
 val reinit:
   ?init_config:OpamFile.InitConfig.t -> interactive:bool -> ?dot_profile:filename ->
   ?update_config:bool -> ?env_hook:bool -> ?completion:bool -> ?inplace:bool ->
-  ?check_sandbox:bool ->
+  ?check_sandbox:bool -> ?bypass_checks:bool ->
+  ?cygwin_setup: [ `internal of OpamSysPkg.t list | `default_location | `location of dirname | `no ] ->
+  ?git_location:(dirname, unit) either ->
   OpamFile.Config.t -> shell -> unit
 
 (** Install the given list of packages. [add_to_roots], if given, specifies that
@@ -52,30 +57,41 @@ val reinit:
     are updated if pinned. *)
 val install:
   rw switch_state ->
+  ?formula:formula ->
   ?autoupdate:atom list -> ?add_to_roots:bool -> ?deps_only:bool ->
   ?ignore_conflicts:bool -> ?assume_built:bool -> ?download_only:bool ->
   ?depext_only:bool -> atom list ->
   rw switch_state
 
-(** Low-level version of [reinstall], bypassing the package name sanitization
+(** Low-level version of {!reinstall}, bypassing the package name sanitization
     and dev package update, and offering more control *)
 val install_t:
   rw switch_state ->
   ?ask:bool -> ?ignore_conflicts:bool -> ?depext_only:bool -> ?download_only:bool ->
-  atom list -> bool option -> deps_only:bool -> assume_built:bool ->
+  atom list -> ?formula:formula ->
+  bool option -> deps_only:bool -> assume_built:bool ->
   rw switch_state
 
 (** Check that the given list of packages [atoms] have their dependencies
-    satisfied, without calling the solver. Returns missing dependencies. *)
+    satisfied, without calling the solver.
+    Returns a map of package names to their set of missing dependencies.
+
+    @param recursive if [true] will check every installed dependencies
+    recursively. For example, this is useful if a package currently installed
+    has been modified and a dependencies has been added but that package has
+    not yet been upgraded.
+    Note: if [true], the keys of the resulting map might contain packages
+    further down the dependency tree and is no longer guaranteed to contain
+    only packages from [atoms]. *)
 val check_installed:
-  build:bool -> post:bool -> rw switch_state -> atom list ->
-  OpamPackage.Name.Set.t OpamPackage.Map.t
+  build:bool -> post:bool -> recursive:bool -> rw switch_state -> atom list ->
+  OpamPackage.Name.Set.t OpamPackage.Name.Map.t
 
 (** Reinstall the given set of packages. *)
 val reinstall:
   rw switch_state -> ?assume_built:bool -> atom list -> rw switch_state
 
-(** Low-level version of [reinstall], bypassing the package name sanitization
+(** Low-level version of {!reinstall}, bypassing the package name sanitization
     and dev package update, and offering more control *)
 val reinstall_t:
   rw switch_state -> ?ask:bool -> ?force:bool -> assume_built:bool -> atom list
@@ -96,24 +112,26 @@ val update:
     confirmation). The upgrade concerns them only unless [all] is specified. *)
 val upgrade:
   rw switch_state ->
-  ?check:bool -> ?only_installed:bool ->
+  ?formula:formula -> ?check:bool -> ?only_installed:bool ->
   all:bool -> atom list -> rw switch_state
 
-(** Low-level version of [upgrade], bypassing the package name sanitization and
+(** Low-level version of {!upgrade}, bypassing the package name sanitization and
    dev package update, and offering more control. [terse] avoids the verbose
    message when we are at a local maximum, but there are possible upgrades *)
 val upgrade_t:
   ?strict_upgrade:bool -> ?auto_install:bool -> ?ask:bool -> ?check:bool ->
   ?terse:bool ->
   ?only_installed:bool ->
-  all:bool -> atom list -> rw switch_state -> rw switch_state
+  all:bool -> atom list -> ?formula:formula ->
+  rw switch_state -> rw switch_state
 
 (** Recovers from an inconsistent universe *)
-val fixup: rw switch_state -> rw switch_state
+val fixup: ?formula:formula -> rw switch_state -> rw switch_state
 
 (** Remove the given list of packages. *)
 val remove:
-  rw switch_state -> autoremove:bool -> force:bool -> atom list ->
+  rw switch_state -> autoremove:bool -> force:bool ->
+  ?formula:formula -> atom list ->
   rw switch_state
 
 module PIN: sig
@@ -123,8 +141,8 @@ module PIN: sig
   val pin:
     rw switch_state ->
     OpamPackage.Name.t ->
-    ?edit:bool -> ?version:version -> ?action:bool -> ?subpath:string ->
-    ?locked:bool ->
+    ?edit:bool -> ?version:version -> ?action:bool -> ?subpath:subpath ->
+    ?locked:string ->
     [< `Source of url | `Version of version | `Dev_upstream
     | `Source_version of version * version
     (* the first version is the source one, the second the package one *)
@@ -133,15 +151,13 @@ module PIN: sig
 
   val edit:
     rw switch_state ->
-    ?action:bool -> ?version:version -> ?locked:bool ->
+    ?action:bool -> ?version:version -> ?locked:string ->
     OpamPackage.Name.t ->
     rw switch_state
 
   val url_pins:
-    rw switch_state -> ?edit:bool -> ?action:bool -> ?locked:bool ->
-    ?pre:((name * version option * OpamFile.OPAM.t option * url * string option)
-          -> unit) ->
-    (name * version option * OpamFile.OPAM.t option * url * string option) list ->
+    rw switch_state -> ?edit:bool -> ?action:bool -> ?locked:string ->
+    ?pre:(pinned_opam -> unit) -> pinned_opam list ->
     rw switch_state
 
   val unpin:
@@ -157,25 +173,3 @@ module PIN: sig
   val post_pin_action: rw switch_state -> package_set -> name list -> rw switch_state
 
 end
-
-
-(** {2 Auxiliary functions}
-    These functions are exposed for advanced uses by external libraries
-*)
-
-(** Orphan packages are installed but no longer available packages; we add
-    special treatment so that opam doesn't force their removal for consistency
-    reasons on any action. Returns the "fixed" state, fully orphan packages (no
-    available version of the package remaining), and orphan package versions.
-
-    Find more technical explanations in the source. *)
-val orphans:
-  ?changes:package_set -> ?transitive:bool ->
-  'a switch_state ->
-  'a switch_state * package_set * package_set
-
-(** An extended version of [orphans] that checks for conflicts between a given
-    request and the orphan packages *)
-val check_conflicts:
-  'a switch_state -> atom list ->
-  'a switch_state * package_set * package_set

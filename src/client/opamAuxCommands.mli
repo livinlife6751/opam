@@ -20,8 +20,8 @@ open OpamStateTypes
     recorded package changes print warnings and aren't copied. *)
 val copy_files_to_destdir: 'a switch_state -> dirname -> package_set -> unit
 
-(** Removes all files that may have been installed by [copy_files_to_destdir];
-    it's more aggressive than [OpamDirTrack.revert] and doesn't check if the
+(** Removes all files that may have been installed by {!copy_files_to_destdir};
+    it's more aggressive than {!OpamDirTrack.revert} and doesn't check if the
     files are current. *)
 val remove_files_from_destdir: 'a switch_state -> dirname -> package_set -> unit
 
@@ -31,23 +31,23 @@ val url_with_local_branch: url -> url
 
 (** From an in-source opam file, return the corresponding package name if it can
     be found, and the corresponding source directory *)
-val name_and_dir_of_opam_file: filename -> name option * dirname
+val name_and_dir_of_opam_file: ?locked:string -> filename -> name option * dirname
 
 (** From a directory, retrieve its opam files and returns packages name, opam
     file and subpath option *)
 val opams_of_dir:
-  ?recurse:bool -> ?subpath:string ->
-  OpamFilename.Dir.t -> (name * OpamFile.OPAM.t OpamFile.t * string option) list
+  ?locked:string -> ?recurse:bool -> ?subpath:subpath ->
+  OpamFilename.Dir.t -> name_and_file list
 
-(** Like [opam_of_dirs], but changes the pinning_url if needed. If given [url]
+(** Like {!opams_of_dir}, but changes the pinning_url if needed. If given [url]
     is local dir with vcs backend, and opam files not versioned, its pinning url
     is changed to rsync path-pin. If [ame_kind the_new_url] returns true,
     package information (name, opam file, new_url, subpath) are added to the
     returned list, otherwise it is discarded. *)
 val opams_of_dir_w_target:
-  ?recurse:bool -> ?subpath:string ->
+  ?locked:string -> ?recurse:bool -> ?subpath:subpath ->
   ?same_kind:(OpamUrl.t -> bool) -> OpamUrl.t -> OpamFilename.Dir.t ->
-  (name * OpamFile.OPAM.t OpamFile.t * OpamUrl.t * string option) list
+  name_and_file_w_url list
 
 (** Resolves the opam files and directories in the list to package name and
     location, and returns the corresponding pinnings and atoms. May fail and
@@ -55,9 +55,9 @@ val opams_of_dir_w_target:
     the same package name appears multiple times.
 *)
 val resolve_locals:
-  ?quiet:bool -> ?recurse:bool -> ?subpath:string ->
+  ?quiet:bool -> ?locked:string -> ?recurse:bool -> ?subpath:subpath ->
   [ `Atom of atom | `Filename of filename | `Dirname of dirname ] list ->
-  (name * OpamUrl.t * string option * OpamFile.OPAM.t OpamFile.t) list * atom list
+  name_and_file_w_url list * atom list
 
 (** Resolves the opam files and directories in the list to package name and
     location, according to what is currently pinned, and returns the
@@ -65,7 +65,7 @@ val resolve_locals:
     is pinned, or opam files corresponding to no pinned package.
 *)
 val resolve_locals_pinned:
-  'a switch_state -> ?recurse:bool -> ?subpath:string ->
+  'a switch_state -> ?recurse:bool -> ?subpath:subpath ->
   [ `Atom of atom | `Dirname of dirname ] list ->
   atom list
 
@@ -84,8 +84,9 @@ val autopin:
   rw switch_state ->
   ?simulate:bool ->
   ?quiet:bool ->
+  ?locked:string ->
   ?recurse:bool ->
-  ?subpath:string ->
+  ?subpath:subpath ->
   [ `Atom of atom | `Filename of filename | `Dirname of dirname ] list ->
   rw switch_state * atom list
 
@@ -99,13 +100,14 @@ val simulate_autopin:
   'a switch_state ->
   ?quiet:bool ->
   ?for_view:bool ->
+  ?locked:string ->
   ?recurse:bool ->
-  ?subpath:string ->
+  ?subpath:subpath ->
   [ `Atom of atom | `Filename of filename | `Dirname of dirname ] list ->
   'a switch_state * atom list
 
 (* Check sandboxing script call. If it errors or unattended output, disable
-   sandboxing by removing [OpamInitDefaults.sandbox_wrappers] commands in
+   sandboxing by removing {!OpamInitDefaults.sandbox_wrappers} commands in
    config file.
    Only one script is checked (init script default one), and tested on an
    `echo SUCCESS' call. *)

@@ -29,8 +29,8 @@ module E = struct
     | ROOTISOK of bool option
     | SHOW of bool option
     | SKIPUPDATE of bool option
-    | STATS of bool option
     | WORKINGDIR of bool option
+    | VERBOSEON of string list option
 
   open OpamStd.Config.E
   let assumedepexts = value (function ASSUMEDEPEXTS b -> b | _ -> None)
@@ -51,13 +51,12 @@ module E = struct
   let rootisok = value (function ROOTISOK b -> b | _ -> None)
   let show = value (function SHOW b -> b | _ -> None)
   let skipupdate = value (function SKIPUPDATE b -> b | _ -> None)
-  let stats = value (function STATS b -> b | _ -> None)
   let workingdir = value (function WORKINGDIR b -> b | _ -> None)
+  let verboseon = value (function VERBOSEON s -> s | _ -> None)
 
 end
 
 type t = {
-  print_stats: bool;
   pin_kind_auto: bool;
   autoremove: bool;
   editor: string;
@@ -75,10 +74,11 @@ type t = {
   no_auto_upgrade: bool;
   assume_depexts: bool;
   cli: OpamCLIVersion.t;
+  scrubbed_environment_variables: string list;
+  verbose_on : OpamTypes.name_set;
 }
 
 let default = {
-  print_stats = false;
   pin_kind_auto = true;
   autoremove = false;
   editor = "nano";
@@ -96,10 +96,11 @@ let default = {
   no_auto_upgrade = false;
   assume_depexts = false;
   cli = OpamCLIVersion.current;
+  scrubbed_environment_variables = [];
+  verbose_on = OpamPackage.Name.Set.empty;
 }
 
 type 'a options_fun =
-  ?print_stats:bool ->
   ?pin_kind_auto:bool ->
   ?autoremove:bool ->
   ?editor:string ->
@@ -117,10 +118,11 @@ type 'a options_fun =
   ?no_auto_upgrade:bool ->
   ?assume_depexts:bool ->
   ?cli:OpamCLIVersion.t ->
+  ?scrubbed_environment_variables:string list ->
+  ?verbose_on:OpamTypes.name_set ->
   'a
 
-let setk k t
-    ?print_stats
+let[@ocaml.warning "-unerasable-optional-argument"] setk k t
     ?pin_kind_auto
     ?autoremove
     ?editor
@@ -138,10 +140,11 @@ let setk k t
     ?no_auto_upgrade
     ?assume_depexts
     ?cli
+    ?scrubbed_environment_variables
+    ?verbose_on
   =
   let (+) x opt = match opt with Some x -> x | None -> x in
   k {
-    print_stats = t.print_stats + print_stats;
     pin_kind_auto = t.pin_kind_auto + pin_kind_auto;
     autoremove = t.autoremove + autoremove;
     editor = t.editor + editor;
@@ -159,6 +162,8 @@ let setk k t
     no_auto_upgrade = t.no_auto_upgrade + no_auto_upgrade;
     assume_depexts = t.assume_depexts + assume_depexts;
     cli = t.cli + cli;
+    scrubbed_environment_variables = t.scrubbed_environment_variables + scrubbed_environment_variables;
+    verbose_on = t.verbose_on + verbose_on;
   }
 
 let set t = setk (fun x () -> x) t
@@ -174,7 +179,6 @@ let initk k =
     E.editor () ++ OpamStd.Env.(getopt "VISUAL" ++ getopt "EDITOR")
   in
   setk (setk (fun c -> r := c; k)) !r
-    ?print_stats:(E.stats ())
     ?pin_kind_auto:(E.pinkindauto ())
     ?autoremove:(E.autoremove ())
     ?editor
@@ -192,24 +196,27 @@ let initk k =
     ?no_auto_upgrade:(E.noautoupgrade ())
     ?assume_depexts:(E.assumedepexts ())
     ?cli:None
+    ?scrubbed_environment_variables:None
+    ?verbose_on:
+      (E.verboseon () >>= function
+        | [] -> None
+        | vo -> Some (OpamPackage.Name.(Set.of_list (List.map of_string vo))))
 
 let init ?noop:_ = initk (fun () -> ())
 
 let search_files = ["findlib"]
 
-open OpamStd.Op
-
 let opam_init ?root_dir ?strict ?solver =
   let open OpamStd.Option.Op in
 
   (* (i) get root dir *)
-  let root = OpamStateConfig.opamroot ?root_dir () in
+  let root_from, root = OpamStateConfig.opamroot_with_provenance ?root_dir () in
 
   (* (ii) load conf file and set defaults *)
   (* the init for OpamFormat is done in advance since (a) it has an effect on
      loading the global config (b) the global config has no effect on it *)
   OpamFormatConfig.initk ?strict @@ fun ?log_dir ->
-  let config = OpamStateConfig.load_defaults root in
+  let config = OpamStateConfig.load_defaults ~lock_kind:`Lock_read root in
   let initialised = config <> None in
   (* !X fixme: don't drop the loaded config file to reload it afterwards (when
      loading the global_state) like that... *)
@@ -227,7 +234,7 @@ let opam_init ?root_dir ?strict ?solver =
     | Some conf ->
       let criteria kind =
         let c = OpamFile.Config.criteria conf in
-        try Some (List.assoc kind c) with Not_found -> None
+        OpamStd.(List.assoc_opt Compare.equal kind c)
       in
       OpamSolverConfig.update
         ?solver
@@ -243,7 +250,7 @@ let opam_init ?root_dir ?strict ?solver =
 
   (* (iii) load from env and options using OpamXxxConfig.init *)
   let log_dir =
-    OpamStd.Option.map OpamFilename.Dir.to_string @@
+    Stdlib.Option.map OpamFilename.Dir.to_string @@
     if log_dir = None && initialised
        && OpamCoreConfig.E.logs () = None then
       (* fixme: in order to not revert [OPAMLOGS] value,
@@ -255,5 +262,5 @@ let opam_init ?root_dir ?strict ?solver =
   OpamCoreConfig.initk ?log_dir |>
   OpamRepositoryConfig.initk |>
   OpamSolverConfig.initk ?solver |>
-  OpamStateConfig.initk ~root_dir:root |>
+  OpamStateConfig.initk ~root_dir:root ~root_from |>
   initk

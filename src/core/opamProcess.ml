@@ -9,10 +9,17 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
-
 let log ?level fmt =
   OpamConsole.log "PROC" ?level fmt
+
+let default_env =
+  let f () = lazy (
+    let env = OpamStd.Env.raw_env () in
+    match OpamCoreConfig.(!r.cygbin) with
+    | Some cygbin -> OpamStd.Env.cyg_env ~env ~cygbin ~git_location:OpamCoreConfig.(!r.git_location)
+    | None -> env
+  ) in
+ fun () -> Lazy.force (f ())
 
 let cygwin_create_process_env prog args env fd1 fd2 fd3 =
   (*
@@ -55,6 +62,9 @@ let cygwin_create_process_env prog args env fd1 fd2 fd3 =
    *        time in OPAM.
    *
    * [This stray " is here to terminate a previous part of the comment!]
+   *
+   * Automatically setting CYGWIN to at least contain winsymlinks:native was
+   * also added later to make sure the native links are used.
    *)
   let make_args argv =
     let b = Buffer.create 128 in
@@ -102,7 +112,7 @@ let cygwin_create_process_env prog args env fd1 fd2 fd3 =
   let (command_line, no_glob) = make_args (Array.to_list args) in
   log "cygvoke(%sglob): %s" (if no_glob then "no" else "") command_line;
   let env = Array.to_list env in
-  let set = ref false in
+  let cygwin_set = ref false in
   let f item =
     let (key, value) =
       match OpamStd.String.cut_at item '=' with
@@ -112,41 +122,56 @@ let cygwin_create_process_env prog args env fd1 fd2 fd3 =
     | "cygwin" ->
         let () =
           if key = "CYGWIN" then
-            set := true in
+            cygwin_set := true in
         let settings = OpamStd.String.split value ' ' in
-        let set = ref false in
+        let noglob_set = ref false in
+        let winsymlinks_set = ref false in
         let f setting =
           let setting = String.trim setting in
-          let setting =
+          let setting, value =
             match OpamStd.String.cut_at setting ':' with
-              Some (setting, _) -> setting
-            | None -> setting in
+            | Some (setting, value) -> (setting, Some value)
+            | None -> (setting, None) in
           match setting with
-            "glob" ->
+          | "glob" ->
               if no_glob then begin
                 log ~level:2 "Removing glob from %s" key;
                 false
               end else begin
                 log ~level:2 "Leaving glob in %s" key;
-                set := true;
+                noglob_set := true;
                 true
               end
           | "noglob" ->
               if no_glob then begin
                 log ~level:2 "Leaving noglob in %s" key;
-                set := true;
+                noglob_set := true;
                 true
               end else begin
                 log ~level:2 "Removing noglob from %s" key;
                 false
               end
+          | "winsymlinks" ->
+              begin match value with
+              | Some ("nativestrict" as value) | Some ("native" as value) ->
+                  log ~level:2 "Leaving %s:%s in %s" setting value key;
+                  winsymlinks_set := true;
+                  true
+              | Some _ | None -> false
+              end
           | _ ->
               true in
         let settings = List.filter f settings in
         let settings =
-          if not !set && no_glob then begin
+          if not !noglob_set && no_glob then begin
             log ~level:2 "Setting noglob in %s" key;
             "noglob"::settings
+          end else
+            settings in
+        let settings =
+          if not !winsymlinks_set then begin
+            log ~level:2 "Setting winsymlinks:native in %s" key;
+            settings @ ["winsymlinks:native"]
           end else
             settings in
         if settings = [] then begin
@@ -154,42 +179,20 @@ let cygwin_create_process_env prog args env fd1 fd2 fd3 =
           None
         end else
           Some (key ^ "=" ^ String.concat " " settings)
-    | "path" ->
-        let path_dirs = OpamStd.Sys.split_path_variable item in
-        let winsys = Filename.concat (OpamStd.Sys.system ()) "." |> String.lowercase_ascii in
-        let rec f prefix suffix = function
-        | dir::dirs ->
-            let contains_cygpath = Sys.file_exists (Filename.concat dir "cygpath.exe") in
-            if suffix = [] then
-              if String.lowercase_ascii (Filename.concat dir ".") = winsys then
-                f prefix [dir] dirs
-              else
-                if contains_cygpath then
-                  path_dirs
-                else
-                  f (dir::prefix) [] dirs
-            else
-              if contains_cygpath then begin
-                log ~level:2 "Moving %s to after %s in PATH" dir (List.hd prefix);
-                List.rev_append prefix (dir::(List.rev_append suffix dirs))
-              end else
-                f prefix (dir::suffix) dirs
-        | [] ->
-            assert false
-        in
-        Some (String.concat ";" (f [] [] path_dirs))
     | _ ->
         Some item in
-  let env = OpamStd.List.filter_map f env in
+  let env = List.filter_map f env in
   let env =
-    if !set then
+    if !cygwin_set then
       env
     else
       if no_glob then begin
-        log ~level:2 "Adding CYGWIN=noglob";
-        "CYGWIN=noglob"::env
-      end else
-        env in
+        log ~level:2 "Adding CYGWIN=winsymlinks:native noglob";
+        "CYGWIN=winsymlinks:native noglob"::env
+      end else begin
+        log ~level:2 "Adding CYGWIN=winsymlinks:native";
+        "CYGWIN=winsymlinks:native"::env
+      end in
   OpamStubs.win_create_process prog command_line
                                (Some(String.concat "\000" env ^ "\000"))
                                fd1 fd2 fd3
@@ -251,8 +254,6 @@ type t = {
   p_tmp_files: string list;
 }
 
-let open_flags =  [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND]
-
 let output_lines oc lines =
   List.iter (fun line ->
     output_string oc line;
@@ -268,7 +269,7 @@ let make_info ?code ?signal
   let home = OpamStd.Sys.home () in
   let print name str =
     let str =
-      if OpamStd.String.starts_with ~prefix:home str
+      if OpamCompat.String.starts_with ~prefix:home str
       then "~"^OpamStd.String.remove_prefix ~prefix:home str
       else str
     in
@@ -281,8 +282,8 @@ let make_info ?code ?signal
   List.iter (fun (k,v) -> print k v) metadata;
   print     "path"         cwd;
   print     "command"      (String.concat " " (cmd :: args));
-  print_opt "exit-code"    (OpamStd.Option.map string_of_int code);
-  print_opt "signalled"    (OpamStd.Option.map string_of_int signal);
+  print_opt "exit-code"    (Option.map string_of_int code);
+  print_opt "signalled"    (Option.map string_of_int signal);
   print_opt "env-file"     env_file;
   if stderr_file = stdout_file then
     print_opt "output-file"  stdout_file
@@ -301,23 +302,22 @@ let string_of_info ?(color=`yellow) info =
         (OpamConsole.colorise color k) v) info;
   Buffer.contents b
 
-let resolve_command_fn = ref (fun ?env:_ ?dir:_ _ -> None)
-let set_resolve_command =
-  let called = ref false in
-  fun resolve_command ->
-    if !called then invalid_arg "Just what do you think you're doing, Dave?";
-    called := true;
-    resolve_command_fn := resolve_command
-let resolve_command cmd = !resolve_command_fn cmd
+let resolve_command ?env ?dir name =
+  let env = match env with None -> default_env () | Some e -> e in
+  match OpamStd.Sys.resolve_command ~env ?dir name with
+  | `Cmd cmd -> Some cmd
+  | `Denied | `Not_found -> None
 
 let create_process_env =
   if Sys.win32 then
     fun cmd ->
-      let resolved_cmd = resolve_command cmd in
-      if OpamStd.(Option.map_default Sys.is_cygwin_variant `Native resolved_cmd) = `Cygwin then
+      if OpamStd.Option.map_default
+          (OpamStd.Sys.is_cygwin_variant
+             ?search_in_first:(OpamCoreConfig.(!r.cygbin)))
+             false
+             (resolve_command cmd) then
         cygwin_create_process_env cmd
-      else
-        Unix.create_process_env cmd
+      else Unix.create_process_env cmd
   else
     Unix.create_process_env
 
@@ -328,16 +328,24 @@ let create_process_env =
     environment can also be overridden if [env] is set. The environment
     which is used to run the process is recorded into [env_file] (if
     set). *)
-let create ?info_file ?env_file ?(allow_stdin=true) ?stdout_file ?stderr_file ?env ?(metadata=[]) ?dir
+let create ?info_file ?env_file ?(allow_stdin=not Sys.win32) ?stdout_file ?stderr_file ?env ?(metadata=[]) ?dir
     ~verbose ~tmp_files cmd args =
   let nothing () = () in
   let tee f =
-    let fd = Unix.openfile f open_flags 0o644 in
+    let flags = [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND; Unix.O_SHARE_DELETE] in
+    let fd = Unix.openfile f flags 0o644 in
     let close_fd () = Unix.close fd in
     fd, close_fd in
   let oldcwd = Sys.getcwd () in
   let cwd = OpamStd.Option.default oldcwd dir in
-  OpamStd.Option.iter Unix.chdir dir;
+  let with_chdir dir =
+    match dir with
+    | None -> (fun f -> f ())
+    | Some dir ->
+      Unix.chdir dir;
+      OpamStd.Exn.finally (fun () -> Unix.chdir oldcwd)
+  in
+  with_chdir dir @@ fun () ->
   let stdin_fd,close_stdin =
     if allow_stdin then Unix.stdin, nothing else
     let fd,outfd = Unix.pipe () in
@@ -354,7 +362,7 @@ let create ?info_file ?env_file ?(allow_stdin=true) ?stdout_file ?stderr_file ?e
       else tee f
   in
   let env = match env with
-    | None   -> Unix.environment ()
+    | None   -> default_env ()
     | Some e -> e in
   let time = Unix.gettimeofday () in
 
@@ -367,7 +375,7 @@ let create ?info_file ?env_file ?(allow_stdin=true) ?stdout_file ?stderr_file ?e
       let env = Array.to_list env in
       (* Remove dubious variables *)
       let env =
-        List.filter (fun line -> not (OpamStd.String.contains_char line '$'))
+        List.filter (fun line -> not (String.contains line '$'))
           env
       in
       output_lines chan env;
@@ -437,14 +445,8 @@ let create ?info_file ?env_file ?(allow_stdin=true) ?stdout_file ?stderr_file ?e
           cmd, args
       else
         cmd, args in
-    let create_process, cmd, args =
-      if Sys.win32 && OpamStd.Sys.is_cygwin_variant cmd = `Cygwin then
-        cygwin_create_process_env, cmd, args
-      else
-        Unix.create_process_env, cmd, args
-    in
     try
-      create_process
+      create_process_env
         cmd
         (Array.of_list (cmd :: args))
         env
@@ -457,7 +459,6 @@ let create ?info_file ?env_file ?(allow_stdin=true) ?stdout_file ?stderr_file ?e
   close_stdin  ();
   close_stdout ();
   close_stderr ();
-  Unix.chdir oldcwd;
   {
     p_name   = cmd;
     p_args   = args;
@@ -524,7 +525,7 @@ let run_background command =
   in
   let verbose = is_verbose_command command in
   let allow_stdin = OpamStd.Option.default false allow_stdin in
-  let env = match env with Some e -> e | None -> Unix.environment () in
+  let env = match env with Some e -> e | None -> default_env () in
   let file ext = match name with
     | None -> None
     | Some n ->
@@ -537,11 +538,17 @@ let run_background command =
       in
       Some (Filename.concat d (Printf.sprintf "%s.%s" n ext))
   in
-  let stdout_file =
-    OpamStd.Option.Op.(cmd_stdout >>+ fun () -> file "out")
-  in
-  let stderr_file =
-    if OpamCoreConfig.(!r.merged_output) then file "out" else file "err"
+  let stdout_file, stderr_file =
+    let err () = file "err" in
+    match cmd_stdout with
+    | None ->
+      let out = file "out" in
+      if OpamCoreConfig.(!r.merged_output) then
+        (out, out)
+      else
+        (out, err ())
+    | Some _ as out ->
+      (out, err ())
   in
   let env_file    = file "env" in
   let info_file   = file "info" in
@@ -573,10 +580,15 @@ let dry_run_background c = {
 }
 
 let verbose_print_cmd p =
-  OpamConsole.msg "%s %s %s%s\n"
+  let args =
+    match p.p_args with
+    | [] -> ""
+    | args ->
+      " " ^ OpamStd.List.concat_map " " (Printf.sprintf "%S") args
+  in
+  OpamConsole.msg "%s %s%s%s\n"
     (OpamConsole.colorise `yellow "+")
-    p.p_name
-    (OpamStd.List.concat_map " " (Printf.sprintf "%S") p.p_args)
+    p.p_name args
     (if p.p_cwd = Sys.getcwd () then ""
      else Printf.sprintf " (CWD=%s)" p.p_cwd)
 
@@ -631,8 +643,8 @@ let set_verbose_process p =
 
 let exit_status p return =
   let duration = Unix.gettimeofday () -. p.p_time in
-  let stdout = OpamStd.Option.default [] (OpamStd.Option.map read_lines p.p_stdout) in
-  let stderr = OpamStd.Option.default [] (OpamStd.Option.map read_lines p.p_stderr) in
+  let stdout = OpamStd.Option.default [] (Option.map read_lines p.p_stdout) in
+  let stderr = OpamStd.Option.default [] (Option.map read_lines p.p_stderr) in
   let cleanup = p.p_tmp_files in
   let code,signal = match return with
     | Unix.WEXITED r -> Some r, None
@@ -641,8 +653,8 @@ let exit_status p return =
   if isset_verbose_f () then
     stop_verbose_f ()
   else if p.p_verbose then
-    (verbose_print_cmd p;
-     List.iter verbose_print_out stdout;
+    (List.iter verbose_print_out stdout;
+     if p.p_stdout <> p.p_stderr then
      List.iter verbose_print_out stderr;
      flush Stdlib.stdout);
   let info =
@@ -669,12 +681,14 @@ let safe_wait fallback_pid f x =
   let cleanup () =
     match sh with
     | Some sh ->
-      ignore (Unix.alarm 0); (* cancels the alarm *)
+      let _ : int = Unix.alarm 0 in (* cancels the alarm *)
       Sys.set_signal Sys.sigalrm sh
     | None -> ()
   in
   let rec aux () =
-    if sh <> None then ignore (Unix.alarm 1);
+    (if sh <> None then
+       let _ : int = Unix.alarm 1 in
+       ());
     match
       try f x with
       | Unix.Unix_error (Unix.EINTR,_,_) -> aux () (* handled signal *)
@@ -703,34 +717,38 @@ let dontwait p =
 let dead_childs = Hashtbl.create 13
 let wait_one processes =
   if processes = [] then raise (Invalid_argument "wait_one");
-  try
-    let p =
-      List.find (fun p -> Hashtbl.mem dead_childs p.p_pid) processes
-    in
-    let return = Hashtbl.find dead_childs p.p_pid in
-    Hashtbl.remove dead_childs p.p_pid;
-    p, exit_status p return
-  with Not_found ->
-    let rec aux () =
-      let pid, return =
-        if Sys.win32 then
-          (* No Unix.wait on Windows, so use a stub wrapping
-             WaitForMultipleObjects *)
-          let pids, len =
-            let f (l, n) t = (t.p_pid::l, succ n) in
-            List.fold_left f ([], 0) processes
-          in
-          OpamStubs.waitpids pids len
-        else
-          safe_wait (List.hd processes).p_pid Unix.wait () in
-      try
-        let p = List.find (fun p -> p.p_pid = pid) processes in
-        p, exit_status p return
-      with Not_found ->
-        Hashtbl.add dead_childs pid return;
-        aux ()
-    in
-    aux ()
+  let p, return =
+    try
+      let p =
+        List.find (fun p -> Hashtbl.mem dead_childs p.p_pid) processes
+      in
+      let return = Hashtbl.find dead_childs p.p_pid in
+      Hashtbl.remove dead_childs p.p_pid;
+      p, return
+    with Not_found ->
+      let rec aux () =
+        let pid, return =
+          if Sys.win32 then
+            (* No Unix.wait on Windows, so use a stub wrapping
+               WaitForMultipleObjects *)
+            let pids, len =
+              let f (l, n) t = (t.p_pid::l, succ n) in
+              List.fold_left f ([], 0) processes
+            in
+            OpamStubs.waitpids pids len
+          else
+            safe_wait (List.hd processes).p_pid Unix.wait () in
+        try
+          let p = List.find (fun p -> p.p_pid = pid) processes in
+          p, return
+        with Not_found ->
+          Hashtbl.add dead_childs pid return;
+          aux ()
+      in
+      aux ()
+  in
+  if p.p_verbose then verbose_print_cmd p;
+  p, exit_status p return
 
 let dry_wait_one = function
   | {p_pid = -1; _} as p :: _ ->
@@ -741,7 +759,7 @@ let dry_wait_one = function
 let run command =
   let command =
     { command with
-      cmd_stdin = OpamStd.Option.Op.(command.cmd_stdin ++ Some true) }
+      cmd_stdin = OpamStd.Option.Op.(command.cmd_stdin ++ Some (not Sys.win32)) }
   in
   let p = run_background command in
   try wait p with e ->
@@ -831,9 +849,12 @@ let string_of_result ?(color=`yellow) r =
   Buffer.contents b
 
 let result_summary r =
-  Printf.sprintf "%S exited with code %d%s"
-    (try List.assoc "command" r.r_info with Not_found -> "command")
-    r.r_code
+  Printf.sprintf "%S exited with code %s%s"
+    (try OpamStd.List.assoc String.equal "command" r.r_info
+     with Not_found -> "command")
+    (if Sys.win32 && r.r_code < 0 then
+       Printf.sprintf "0x%08lx" (Int32.of_int r.r_code)
+     else string_of_int r.r_code)
     (if r.r_code = 0 then "" else
      match r.r_stderr, r.r_stdout with
      | [e], _ | [], [e] -> Printf.sprintf " \"%s\"" e
@@ -872,7 +893,7 @@ module Job = struct
     let rec aux = function
       | Done x -> x
       | Run (cmd,cont) ->
-        OpamStd.Option.iter
+        Option.iter
           (if OpamConsole.disp_status_line () then
              OpamConsole.status_line "Processing: %s"
            else if OpamConsole.verbose () then
@@ -908,7 +929,7 @@ module Job = struct
   let ignore_errors ~default ?message job =
     catch (fun e ->
         OpamStd.Exn.fatal e;
-        OpamStd.Option.iter (OpamConsole.error "%s") message;
+        Option.iter (OpamConsole.error "%s") message;
         Done default)
       job
 

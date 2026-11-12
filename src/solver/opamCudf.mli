@@ -32,7 +32,7 @@ module Map: OpamStd.MAP with type key = Package.t
 module Graph: sig
   (** Graph of cudf packages *)
 
-  include module type of Algo.Defaultgraphs.PackageGraph.G
+  include module type of Dose_algo.Defaultgraphs.PackageGraph.G
 
   (** Build a graph from a CUDF universe. Warning: dependency edges are towards
       the dependency, which is the reverse of what happens in the action
@@ -58,15 +58,13 @@ module ActionGraph: OpamActionGraph.SIG with type package = Package.t
 (** Abstract type that may be returned in case of conflicts *)
 type conflict
 
-(** Return the transitive closure of dependencies of [set] *)
-val dependencies: Cudf.universe -> Set.t -> Set.t
-
-(** Return the transitive closure of reverse dependencies of [set] *)
-val reverse_dependencies: Cudf.universe -> Set.t -> Set.t
-
 (** Sorts the given packages topolgically (be careful if there are cycles, e.g.
    if the universe was loaded with [post] dependencies enabled) *)
 val dependency_sort: Cudf.universe -> Set.t -> Cudf.package list
+
+(** Pre-process a universe to remove incompatible/unneeded packages and ease the
+    task of the solvers *)
+val trim_universe: Cudf.universe -> Set.t -> Cudf.universe
 
 (** Check if a request is satisfiable and return the reasons why not unless
     [explain] is set to [false] *)
@@ -75,18 +73,18 @@ val check_request:
   version_map:int OpamPackage.Map.t ->
   Cudf.universe ->
   Cudf_types.vpkg request ->
-  (Cudf.universe, conflict) result
+  (Cudf.universe, conflict) solver_result
 
 (** Compute the final universe state using the external solver. *)
 val get_final_universe:
   version_map:int OpamPackage.Map.t ->
   Cudf.universe ->
   Cudf_types.vpkg request ->
-  (Cudf.universe, conflict) result
+  (Cudf.universe, conflict) solver_result
 
 (** Compute the list of actions to match the difference between two
     universe. Remark: the result order is unspecified, ie. need to use
-    [atomic_actions] to get a solution which respects the
+    {!atomic_actions} to get a solution which respects the
     topological order induced by dependencies. *)
 val actions_of_diff:
   (Set.t * Set.t) -> Cudf.package atomic_action list
@@ -103,19 +101,29 @@ exception Cyclic_actions of Cudf.package action list list
     [reduce_actions] to reduce it to a graph including reinstall and
     up/down-grade actions.
 
-    May raise [Cyclic_actions]. *)
+    @raise Cyclic_actions *)
 val atomic_actions:
   simple_universe:Cudf.universe ->
   complete_universe:Cudf.universe ->
   [< Cudf.package highlevel_action ] list ->
   ActionGraph.t
 
+(** Removes from a graph of actions the disjoint subgraphs that don't concern
+   requested packages. The provided universe should *include*
+   [post]-dependencies so that they don't get trimmed away.
+   Note: if the specified [requested] set is empty, all actions are supposed to
+   be meaningful. *)
+val trim_actions: Cudf.universe -> OpamPackage.Name.Set.t -> ActionGraph.t -> unit
+
 (** Heuristic to compute the likely cause of all actions in a graph from the set
     of packages passed in the original request. Assumes a reduced graph. Takes
-    the set of requested package names, and the set of packages marked for
-    reinstall. *)
+    the set of requested package names, the set of packages marked for
+    reinstall, and the set of all available packages. *)
 val compute_root_causes:
-  ActionGraph.t -> OpamPackage.Name.Set.t -> OpamPackage.Set.t ->
+  ActionGraph.t ->
+  OpamPackage.Name.Set.t ->
+  OpamPackage.Set.t ->
+  OpamPackage.Set.t ->
   Cudf.package cause Map.t
 
 exception Solver_failure of string
@@ -128,19 +136,16 @@ val resolve:
   version_map:int OpamPackage.Map.t ->
   Cudf.universe ->
   Cudf_types.vpkg request ->
-  (Cudf.universe, conflict) result
+  (Cudf.universe, conflict) solver_result
 
-(** Computes a list of actions to proceed from the result of [resolve].
+(** Computes a list of actions to proceed from the result of {!resolve}.
     Note however than the action list is not yet complete: the transitive closure
     of reinstallations is not yet completed, as it requires to fold over the
-    dependency graph in considering the optional dependencies.
-    The first argument specifies a function that will be applied to the starting
-    universe before computation: useful to re-add orphan packages. *)
+    dependency graph in considering the optional dependencies. *)
 val to_actions:
-  (Cudf.universe -> Cudf.universe) ->
   Cudf.universe ->
-  (Cudf.universe, conflict) result ->
-  (Cudf.package atomic_action list, conflict) result
+  (Cudf.universe, conflict) solver_result ->
+  (Cudf.package atomic_action list, conflict) solver_result
 
 (** [remove universe name constr] Remove all the packages called
     [name] satisfying the constraints [constr] in the universe
@@ -189,7 +194,15 @@ val opam_invariant_package_name: string
     switch invariants *)
 val opam_invariant_package: string * int
 
+val opam_deprequest_package_name: string
+val opam_deprequest_package: string * int
+
 val is_opam_invariant: Cudf.package -> bool
+
+(** dummy package that shouldn't exist and encodes unavailability (by depending on it) *)
+val unavailable_package_name: string
+val unavailable_package: string * int
+val is_unavailable_package: Cudf.package -> bool
 
 (** {2 Pretty-printing} *)
 
@@ -198,10 +211,15 @@ val string_of_vpkgs: Cudf_types.vpkg list -> string
 
 val make_conflicts:
   version_map:int package_map -> Cudf.universe ->
-  Algo.Diagnostic.diagnosis -> ('a, conflict) result
+  Dose_algo.Diagnostic.diagnosis -> ('a, conflict) solver_result
 val cycle_conflict:
   version_map:int package_map -> Cudf.universe ->
-  string list list -> ('a, conflict) result
+  Cudf.package action list list -> ('a, conflict) solver_result
+
+type explanation =
+  [ `Conflict of string option * string list * bool
+  | `Missing of string option * string * OpamFormula.t
+  ]
 
 (** Convert a conflict to something readable by the user. The second argument
     should return a string explaining the unavailability, or the empty string,
@@ -211,6 +229,11 @@ val string_of_conflicts:
   package_set -> (name * OpamFormula.version_formula -> string) -> conflict ->
   string
 
+val string_of_explanations:
+  (name * OpamFormula.version_formula -> string) ->
+  explanation list * Action.t list list ->
+  string
+
 (** Returns two lists:
     - the reasons why the request can't be satisfied with conflict explanations
     - the cycles in the actions to process (exclusive with the first) *)
@@ -218,10 +241,19 @@ val conflict_explanations:
   package_set -> (name * OpamFormula.version_formula -> string) -> conflict ->
   (string * string list * string list) list * string list
 
-(** Properly concat a single conflict as returned by [conflict_explanations] for
-   display *)
+val string_of_explanation:
+  (name * OpamFormula.version_formula -> string) -> explanation ->
+  string * string list * string list
+
+val conflict_explanations_raw:
+  package_set -> conflict -> explanation list * Action.t list list
+
+(** Properly concat a single conflict as returned by {!conflict_explanations}
+    for display *)
 val string_of_conflict:
   ?start_column:int -> string * string list * string list -> string
+
+val conflict_cycles : conflict -> package action list list option
 
 (** Dumps the given cudf universe to the given channel *)
 val dump_universe: out_channel -> Cudf.universe -> unit
@@ -244,10 +276,14 @@ val cudf2opam: Cudf.package -> package
 (** Returns the list of packages in a Cudf universe *)
 val packages: Cudf.universe -> Cudf.package list
 
-(** Converts an OPAM request to a Cudf request *)
+(** Converts an OPAM request to a Cudf request. The [wish_install] field is
+    required to be a conjunction *)
 val to_cudf: Cudf.universe -> Cudf_types.vpkg request
   -> Cudf.preamble * Cudf.universe * Cudf.request
 
+(** Like {!OpamTypesBase.action_contents} but return the single package of
+    remove, install, reinstal, and change action *)
+val action_contents: 'a action -> 'a
 
 module Json: sig
   open Cudf_types

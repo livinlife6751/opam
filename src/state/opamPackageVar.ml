@@ -46,12 +46,12 @@ let package_variable_names = [
   "dev",       "True if this is a development package";
   "build-id",  "A hash identifying the precise package version with all its \
                 dependencies";
-  "opamfile", "Path of the curent opam file";
+  "opamfile", "Path of the current opam file";
 ]
 
 let predefined_depends_variables =
   List.map OpamVariable.Full.of_string [
-    "build"; "post"; "with-test"; "with-doc"; "dev";
+    "build"; "post"; "with-test"; "with-doc"; "with-dev-setup"; "dev";
   ]
 
 let resolve_global gt full_var =
@@ -70,6 +70,8 @@ let resolve_global gt full_var =
       | "root"          -> Some (V.string (OpamFilename.Dir.to_string gt.root))
       | "make"          -> Some (V.string OpamStateConfig.(Lazy.force !r.makecmd))
       | "exe"           -> Some (V.string (OpamStd.Sys.executable_name ""))
+      | "switch"        -> Option.map (OpamSwitch.to_string @> V.string)
+                             (OpamStateConfig.get_switch_opt ())
       | _               -> None
 
 (** Resolve switch-global variables only, as allowed by the 'available:'
@@ -106,6 +108,7 @@ let resolve_switch_raw ?package gt switch switch_config full_var =
       | Some _ as c -> c
       | None ->
         match V.to_string var with
+        (* we keep it in case no global switch is defined *)
         | "switch" -> Some (V.string (OpamSwitch.to_string switch))
         | _ -> None
 
@@ -131,6 +134,7 @@ let filter_depends_formula
     ?(post=false)
     ?(test=OpamStateConfig.(!r.build_test))
     ?(doc=OpamStateConfig.(!r.build_doc))
+    ?(dev_setup=OpamStateConfig.(!r.dev_setup))
     ?(dev=false)
     ?default
     ~env
@@ -138,11 +142,12 @@ let filter_depends_formula
   =
   ff |>
   OpamFilter.partial_filter_formula (fun v ->
-      if List.mem v predefined_depends_variables then None
+      if OpamStd.List.mem OpamVariable.Full.equal v predefined_depends_variables
+      then None
       else env v) |>
-  OpamFilter.filter_deps ~build ~post ~test ~doc ~dev ?default
+  OpamFilter.filter_deps ~build ~post ~test ~doc ~dev_setup ~dev ?default
 
-let all_depends ?build ?post ?test ?doc ?dev ?(filter_default=false)
+let all_depends ?build ?post ?test ?doc ?dev_setup ?dev ?(filter_default=false)
     ?(depopts=true) st opam =
   let dev = match dev with None -> is_dev_package st opam | Some d -> d in
   let deps =
@@ -150,7 +155,7 @@ let all_depends ?build ?post ?test ?doc ?dev ?(filter_default=false)
       (OpamFile.OPAM.depends opam ::
        if depopts then [OpamFile.OPAM.depopts opam] else [])
   in
-  filter_depends_formula ?build ?post ?test ?doc ~dev
+  filter_depends_formula ?build ?post ?test ?doc ?dev_setup ~dev
     ~default:filter_default
     ~env:(resolve_switch ~package:(OpamFile.OPAM.package opam) st) deps
 
@@ -209,7 +214,7 @@ let build_id st opam =
 (* filter handling *)
 let resolve st ?opam:opam_arg ?(local=OpamVariable.Map.empty) v =
   let dirname dir = string (OpamFilename.Dir.to_string dir) in
-  let pkgname = OpamStd.Option.map OpamFile.OPAM.name opam_arg in
+  let pkgname = Option.map OpamFile.OPAM.name opam_arg in
   let read_package_var v =
     let get name =
       try
@@ -264,7 +269,7 @@ let resolve st ?opam:opam_arg ?(local=OpamVariable.Map.empty) v =
     | "name", opam ->
       (* On reinstall, orphan packages are not present in the state, and we
          need to resolve their internal name variable *)
-      if OpamStd.Option.map OpamFile.OPAM.name opam = Some name
+      if Option.map OpamFile.OPAM.name opam = Some name
       || OpamPackage.has_name st.packages name
       then Some (string (OpamPackage.Name.to_string name))
       else None
@@ -295,32 +300,31 @@ let resolve st ?opam:opam_arg ?(local=OpamVariable.Map.empty) v =
       in
       Some (string str_deps)
     | "hash", Some opam ->
-      (try
-         let nv = get_nv opam in
-         let f = OpamPath.archive root nv in
-         if OpamFilename.exists f then
-           Some (string (OpamHash.to_string
-                           (OpamHash.compute ~kind:`MD5
-                              (OpamFilename.to_string f))))
-         else Some (string "")
-       with Not_found -> Some (string ""))
+      OpamStd.Option.Op.(
+        OpamFile.OPAM.url opam
+        >>| OpamFile.URL.checksum
+        >>| OpamHash.sort
+        >>= (function [] -> None
+                    | h::_ -> Some (string (OpamHash.to_string h))))
     | "dev", Some opam -> Some (bool (is_dev_package st opam))
-    | "build-id", Some opam -> OpamStd.Option.map string (build_id st opam)
+    | "build-id", Some opam -> Option.map string (build_id st opam)
     | "opamfile", Some opam ->
-      (* Opamfile path is retrieved from overlay directory for pinned packages,
-         or from temporary repository in /tmp *)
-      let repos_roots reponame =
-        match Hashtbl.find st.switch_repos.repos_tmp reponame with
-        | lazy repo_root -> repo_root
-        | exception Not_found ->
-          OpamRepositoryPath.root st.switch_global.root reponame
-      in
-      OpamFile.OPAM.get_metadata_dir ~repos_roots opam
-      |> OpamStd.Option.map (fun d ->
-          OpamFilename.Op.(d//"opam")
-          |> OpamFilename.to_string
-          |> string
-        )
+      let nv = get_nv opam in
+      let ret file = Some (string (OpamFile.to_string file)) in
+      if OpamPackage.Set.mem nv st.installed then
+        ret (OpamPath.Switch.installed_opam st.switch_global.root st.switch nv)
+      else if OpamPackage.Set.mem nv st.pinned then
+        ret (OpamPath.Switch.Overlay.opam st.switch_global.root st.switch (OpamPackage.name nv))
+      else if OpamPackage.Set.mem nv st.packages then
+        let opam = OpamPackage.Map.find nv st.opams in
+        let temp_dir = OpamFilename.mk_tmp_dir () in
+        let dest =
+          OpamFile.make OpamFilename.Op.(temp_dir // OpamPathName.opam_f)
+        in
+        OpamFile.OPAM.write dest opam;
+        ret dest
+      else
+        None
     | _, _ -> None
   in
   let make_package_local v =

@@ -15,6 +15,9 @@ type t
 
 val kind: t -> kind
 
+(** The list of all the possible values of kind *)
+val all_kinds : kind list
+
 (** The value of the hash, as a string of hexadecimal characters *)
 val contents: t -> string
 
@@ -27,14 +30,26 @@ val sha512: string -> t
 include OpamStd.ABSTRACT with type t := t
 
 val of_string_opt: string -> t option
+val compare_kind: kind -> kind -> int
+val equal_kind: kind -> kind -> bool
+
+(** Check if [hash] contains only 0 *)
+val is_null: t -> bool
 
 (** returns a sub-path specific to this hash, e.g.
     "md5/d4/d41d8cd98f00b204e9800998ecf8427e", as a list *)
 val to_path: t -> string list
 
+(** Sorts the list from best hash (SHA512, ...) to weakest (..., MD5) *)
+val sort : t list -> t list
+
+(** Compute the hash of the file and check it *)
 val check_file: string -> t -> bool
 
-(** Like [check_file], but returns the actual mismatching hash of the file, or
+(** Compute the hash of the string and check it *)
+val check_string: string -> t -> bool
+
+(** Like {!check_file}, but returns the actual mismatching hash of the file, or
     [None] in case of match *)
 val mismatch: string -> t -> t option
 

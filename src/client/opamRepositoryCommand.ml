@@ -11,7 +11,6 @@
 
 open OpamTypes
 open OpamStateTypes
-open OpamStd.Op
 
 let log fmt = OpamConsole.log "REPOSITORY" fmt
 
@@ -28,7 +27,7 @@ let update_selection gt ~global ~switches update_fun =
   if global then
     (* ensure all unselected switches aren't modified by changing the default *)
     (List.iter (fun sw ->
-         if not (List.mem sw switches) then
+         if not (OpamStd.List.mem OpamSwitch.equal sw switches) then
            OpamSwitchState.update_repositories gt (fun r -> r) sw)
         (OpamFile.Config.installed_switches gt.config);
      let (), gt =
@@ -82,12 +81,10 @@ let add rt name url trust_anchors =
     let repo = { repo_name = name; repo_url = url;
                  repo_trust = trust_anchors; }
     in
-    if OpamFilename.exists_dir (OpamRepositoryPath.root root name) ||
-       OpamFilename.exists (OpamRepositoryPath.tar root name)
-    then
+    if OpamRepositoryRoot.root_exists root name then
       OpamConsole.error_and_exit `Bad_arguments
         "Invalid repository name, %s exists"
-        (OpamFilename.Dir.to_string (OpamRepositoryPath.root root name));
+        (OpamRepositoryName.to_string name);
     if url.OpamUrl.backend = `rsync &&
        OpamUrl.local_dir url <> None &&
        OpamUrl.local_dir (OpamRepositoryPath.Remote.packages_url url)
@@ -106,8 +103,7 @@ let remove rt name =
     update_repos_config rt (OpamRepositoryName.Map.remove name rt.repositories)
   in
   OpamRepositoryState.Cache.save rt;
-  OpamFilename.rmdir (OpamRepositoryPath.root rt.repos_global.root name);
-  OpamFilename.remove (OpamRepositoryPath.tar rt.repos_global.root name);
+  OpamRepositoryRoot.remove_both rt.repos_global.root name;
   rt
 
 let set_url rt name url trust_anchors =
@@ -118,10 +114,8 @@ let set_url rt name url trust_anchors =
       OpamConsole.error_and_exit `Not_found "No repository %s found"
         (OpamRepositoryName.to_string name);
   in
-  OpamFilename.cleandir (OpamRepositoryPath.root rt.repos_global.root name);
-  OpamFilename.remove (OpamRepositoryPath.tar rt.repos_global.root name);
+  OpamRepositoryRoot.remove_both rt.repos_global.root name;
   let repo = { repo with repo_url = url; repo_trust = trust_anchors; } in
-  OpamRepositoryState.remove_from_repos_tmp  rt name;
   update_repos_config rt (OpamRepositoryName.Map.add name repo rt.repositories)
 
 let print_selection rt ~short repos_list =
@@ -145,8 +139,8 @@ let print_selection rt ~short repos_list =
 
 let switch_repos rt sw =
   let switch_config =
-    OpamFile.Switch_config.safe_read
-      (OpamPath.Switch.switch_config rt.repos_global.root sw)
+    OpamStateConfig.Switch.safe_load
+      ~lock_kind:`Lock_read rt.repos_global sw
   in
   match switch_config.OpamFile.Switch_config.repos with
   | None -> OpamGlobalState.repos_list rt.repos_global
@@ -189,8 +183,8 @@ let list_all rt ~short =
         let n_repos = List.length repos in
         let acc,_ =
           List.fold_left (fun (acc,i) repo ->
-              OpamRepositoryName.Map.update repo
-                (fun s -> (Some sw, (i, n_repos))::s) [] acc,
+              let elm = (Some sw, (i, n_repos)) in
+              OpamRepositoryName.Map.add_to_list repo elm acc,
               i + 1)
             (acc,1) repos
         in acc)
@@ -231,57 +225,49 @@ let update_with_auto_upgrade rt repo_names =
   else
   let rt, done_upgrade =
     List.fold_left (fun (rt, done_upgrade) r ->
-        if List.mem r.repo_name failed then rt, done_upgrade else
-        let def =
-          OpamRepositoryName.Map.find r.repo_name rt.repos_definitions
-        in
-        let need_upgrade = match OpamFile.Repo.opam_version def with
-          | None ->
-            OpamConsole.note
-              "Repository at %s doesn't define its version, assuming it's 1.2."
-              (OpamUrl.to_string r.repo_url);
-            true
-          | Some v when
-              OpamVersion.compare v OpamAdminRepoUpgrade.upgradeto_version < 0
-            -> true
-          | _ -> false
-        in
-        if need_upgrade then
-          (if not done_upgrade then
-             (OpamConsole.header_msg
-                "Upgrading repositories from older opam format";
-              OpamRepositoryState.Cache.remove ());
-           OpamConsole.msg "Upgrading repository \"%s\"...\n"
-             (OpamRepositoryName.to_string r.repo_name);
-           let open OpamProcess.Job.Op in
-           let repo_root = OpamRepositoryState.get_repo_root rt r in
-           OpamAdminRepoUpgrade.do_upgrade repo_root;
-           OpamProcess.Job.run
-             (OpamFilename.make_tar_gz_job
-                (OpamRepositoryPath.tar rt.repos_global.root r.repo_name)
-                repo_root
-              @@| function
-              | Some e ->
-                Printf.ksprintf failwith
-                  "Failed to regenerate local repository archive: %s"
-                  (Printexc.to_string e)
-              | None -> ());
-           let def =
-             OpamFile.Repo.safe_read (OpamRepositoryPath.repo repo_root) |>
-             OpamFile.Repo.with_root_url r.repo_url
-           in
-           let opams =
-             OpamRepositoryState.load_opams_from_dir r.repo_name repo_root
-           in
-           let rt = {
-             rt with
-             repos_definitions =
-               OpamRepositoryName.Map.add r.repo_name def rt.repos_definitions;
-             repo_opams =
-               OpamRepositoryName.Map.add r.repo_name opams rt.repo_opams;
-           } in
-           rt, true)
-        else rt, done_upgrade)
+        if OpamStd.List.mem OpamRepositoryName.equal r.repo_name failed then
+          rt, done_upgrade
+        else
+          let def =
+            OpamRepositoryName.Map.find r.repo_name rt.repos_definitions
+          in
+          let need_upgrade = match OpamFile.Repo.opam_version def with
+            | None ->
+              OpamConsole.note
+                "Repository at %s doesn't define its version, assuming it's 1.2."
+                (OpamUrl.to_string r.repo_url);
+              true
+            | Some v when
+                OpamVersion.compare v OpamAdminRepoUpgrade.upgradeto_version < 0
+              -> true
+            | _ -> false
+          in
+          if need_upgrade then
+            (if not done_upgrade then
+               (OpamConsole.header_msg
+                  "Upgrading repositories from older opam format";
+                OpamRepositoryState.Cache.remove ());
+             OpamConsole.msg "Upgrading repository \"%s\"...\n"
+               (OpamRepositoryName.to_string r.repo_name);
+             let repo_root = OpamRepositoryState.get_repo_root rt r in
+             OpamRepositoryRoot.on_dir (fun dir ->
+                 OpamAdminRepoUpgrade.do_upgrade (OpamRepositoryRoot.Dir.of_dir dir))
+               repo_root;
+             let def, opams =
+               OpamRepositoryState.load_repo r repo_root
+             in
+             let def =
+               OpamFile.Repo.with_root_url r.repo_url def
+             in
+             let rt = {
+               rt with
+               repos_definitions =
+                 OpamRepositoryName.Map.add r.repo_name def rt.repos_definitions;
+               repo_opams =
+                 OpamRepositoryName.Map.add r.repo_name opams rt.repo_opams;
+             } in
+             rt, true)
+          else rt, done_upgrade)
       (rt, false) repos
   in
   if done_upgrade then OpamRepositoryState.Cache.save rt;

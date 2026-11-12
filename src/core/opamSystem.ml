@@ -9,10 +9,9 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
-
 type install_warning =
-  [ `Add_exe | `Install_dll | `Install_script | `Install_unknown | `Cygwin | `Cygwin_libraries ]
+  [ `Add_exe | `Install_dll | `Install_script | `Install_unknown
+  | `Cygwin | `Msys2 | `Tainted of [`Msys2 | `Cygwin] | `Cygwin_libraries ]
 type install_warning_fn = string -> install_warning -> unit
 
 exception Process_error of OpamProcess.result
@@ -51,20 +50,54 @@ module Sys2 = struct
 end
 
 let file_or_symlink_exists f =
-  try ignore (Unix.lstat f); true
+  try
+    let _ : Unix.stats = (Unix.lstat f) in
+    true
   with Unix.Unix_error (Unix.ENOENT, _, _) -> false
 
 let (/) = Filename.concat
 
+let rec real_path p =
+  try OpamCompat.Unix.realpath p with
+  | Unix.Unix_error _ when p = "." ->
+    raise (Sys_error "No such file or directory")
+  | Unix.Unix_error _ ->
+    let dirname = Filename.dirname p in
+    match Filename.basename p with
+    | "." -> real_path dirname
+    | ".." ->
+      let dirname = real_path dirname in
+      if String.equal (Filename.dirname dirname) dirname then
+        raise (Sys_error "Invalid path")
+      else
+        Filename.dirname dirname
+    | x -> real_path dirname / x
+
 let temp_basename prefix =
+  (* Sync with tests/reftests/run.ml *)
   Printf.sprintf "%s-%d-%06x" prefix (OpamStubs.getpid ()) (Random.int 0xFFFFFF)
 
-let rec mk_temp_dir ?(prefix="opam") () =
-  let s = Filename.get_temp_dir_name () / temp_basename prefix in
+let temp_name ?dir ?(prefix="opam") () =
+  let tmpdir =
+    match dir with
+    | Some d -> d
+    | None -> Filename.get_temp_dir_name ()
+  in
+  tmpdir / (temp_basename prefix)
+
+let rec mk_temp_dir ?prefix () =
+  let s = temp_name ?prefix () in
   if Sys.file_exists s then
-    mk_temp_dir ()
+    mk_temp_dir ?prefix ()
   else
-    s
+    real_path s
+
+let rec mk_unique_dir ~dir ?(prefix="opam") () =
+  let s = dir / Printf.sprintf "%s-%06x" prefix (Random.int 0xFFFFFF) in
+  if Sys.file_exists s then
+    mk_unique_dir ~dir ~prefix ()
+  else
+    real_path s
 
 let safe_mkdir dir =
   try
@@ -81,19 +114,89 @@ let mkdir dir =
     end in
   aux dir
 
-let rm_command =
-  if Sys.win32 then
-    "cmd /d /v:off /c rd /s /q"
-  else
-    "rm -rf"
+let is_vcs = function
+  | ".git" | ".hg" | "_darcs" -> true
+  | _ -> false
+
+let get_files_t ~except_vcs dirname =
+  let dir = Unix.opendir dirname in
+  let rec aux files =
+    match Unix.readdir dir with
+    | "." | ".." -> aux files
+    | file ->
+      if except_vcs && is_vcs file then aux files
+      else
+        aux (file :: files)
+    | exception End_of_file -> files
+  in
+  let files = aux [] in
+  Unix.closedir dir;
+  files
+
+let get_files = get_files_t ~except_vcs:false
+let get_files_except_vcs = get_files_t ~except_vcs:true
+
+let log_for_file_management with_log =
+  if with_log then 1 else 4
+
+(* From stdune/src/fpath.ml *)
+let win32_unlink fn =
+  try Unix.unlink fn
+  with Unix.Unix_error (Unix.EACCES, _, _) as e -> (
+    try
+      (* Try removing the read-only attribute *)
+      Unix.chmod fn 0o666;
+      Unix.unlink fn
+    with _ -> raise e)
+
+let remove_file_t ?(with_log=true) file =
+  try
+    log ~level:(log_for_file_management with_log) "rm %s" file;
+    if Sys.win32 then
+      win32_unlink file
+    else
+      Unix.unlink file
+  with Unix.Unix_error _ as e ->
+    internal_error "Cannot remove %s (%s)." file (Printexc.to_string e)
+
+let is_reg_dir dir =
+  match Unix.lstat dir with
+  | {Unix.st_kind = Unix.S_DIR; _} -> true
+  | {Unix.st_kind =
+       Unix.(S_REG | S_LNK | S_CHR | S_BLK | S_FIFO | S_SOCK); _} ->
+    false
+  | exception Unix.(Unix_error (ENOENT, _, _)) when Sys.win32 ->
+    (* This is usually caused by invalid symlinks extracted by a
+       Cygwin/MSYS2 tar. *)
+    false
+
+let rec remove_dir_t dir =
+  let files = get_files dir in
+  List.iter (fun file ->
+      let file = Filename.concat dir file in
+      if is_reg_dir file then
+        remove_dir_t file
+      else
+        remove_file_t ~with_log:false file
+    ) files;
+  Unix.rmdir dir
 
 let remove_dir dir =
   log "rmdir %s" dir;
-  if Sys.file_exists dir then (
-    let err = Sys.command (Printf.sprintf "%s %s" rm_command dir) in
-      if err <> 0 then
-        internal_error "Cannot remove %s (error %d)." dir err
-  )
+  if Sys.file_exists dir then begin
+    if is_reg_dir dir then
+      remove_dir_t dir
+    else
+      remove_file_t ~with_log:true dir
+  end
+
+let is_dir_read_only dir =
+  if not (is_reg_dir dir) then invalid_arg "OpamSystem.is_dir_read_only";
+  try
+    Unix.access dir [W_OK];
+    false
+  (* EROFS for linux and EPERM for osx *)
+  with Unix.Unix_error ((EROFS|EPERM), _, _) -> true
 
 let temp_files = Hashtbl.create 1024
 let logs_cleaner =
@@ -121,7 +224,7 @@ let rec temp_file ?(auto_clean=true) ?dir prefix =
     | None   -> OpamCoreConfig.(!r.log_dir)
     | Some d -> d in
   mkdir temp_dir;
-  let file = temp_dir / temp_basename prefix in
+  let file = temp_name ~dir:temp_dir ~prefix () in
   if Hashtbl.mem temp_files file then
     temp_file ~auto_clean ?dir prefix
   else (
@@ -132,11 +235,18 @@ let rec temp_file ?(auto_clean=true) ?dir prefix =
 
 let remove_file file =
   if
-    try ignore (Unix.lstat file); true with Unix.Unix_error _ -> false
-  then (
     try
-      log "rm %s" file;
-      Unix.unlink file
+      let _ : Unix.stats = Unix.lstat file in
+      true
+    with Unix.Unix_error _ -> false
+  then (
+    log "rm %s" file;
+    try
+      try Unix.unlink file
+      with Unix.Unix_error(EACCES, _, _) when Sys.win32 ->
+        (* Attempt to remove the read-only bit on Windows *)
+        Unix.chmod file 0o666;
+        Unix.unlink file
     with Unix.Unix_error _ as e ->
       internal_error "Cannot remove %s (%s)." file (Printexc.to_string e)
   )
@@ -157,6 +267,7 @@ let string_of_channel ic =
   Buffer.contents b
 
 let read file =
+  log ~level:5 "read %s" file;
   let ic =
     try open_in_bin file
     with Sys_error _ -> raise (File_not_found file) in
@@ -167,6 +278,7 @@ let read file =
 
 let write file contents =
   mkdir (Filename.dirname file);
+  log ~level:5 "write %s" file;
   let oc =
     try open_out_bin file
     with Sys_error _ -> raise (File_not_found file)
@@ -177,18 +289,34 @@ let write file contents =
 
 let setup_copy ?(chmod = fun x -> x) ~src ~dst () =
   let ic = open_in_bin src in
-  let oc =
+  try
+    let perm =
+      (Unix.fstat (Unix.descr_of_in_channel ic)).st_perm |> chmod
+    in
+    let () =
+      try if Unix.((lstat dst).st_kind <> S_REG) then
+            remove_file dst
+      with Unix.Unix_error(ENOENT, _, _) -> ()
+    in
+    let fd =
+      let flags = Unix.[ O_WRONLY; O_CREAT; O_TRUNC ] in
+      try Unix.openfile dst flags perm
+      with Unix.Unix_error(EACCES, _, _) when Sys.win32 ->
+        (* Attempt to remove the read-only bit on Windows *)
+        begin
+          try Unix.chmod dst 0o666
+          with Unix.Unix_error(_, _, _) -> ()
+        end;
+        Unix.openfile dst flags perm
+    in
     try
-      let perm =
-        (Unix.fstat (Unix.descr_of_in_channel ic)).st_perm |> chmod
-      in
-      open_out_gen
-        [ Open_wronly; Open_creat; Open_trunc; Open_binary ]
-        perm dst
+      if Unix.((fstat fd).st_perm) <> perm then
+        Unix.fchmod fd perm;
+      (ic, Unix.out_channel_of_descr fd)
     with exn ->
-      OpamStd.Exn.finalise exn (fun () -> close_in ic)
-  in
-  (ic, oc)
+      OpamStd.Exn.finalise exn (fun () -> Unix.close fd)
+  with exn ->
+    OpamStd.Exn.finalise exn (fun () -> close_in ic)
 
 let copy_channels =
   let buf_len = 4096 in
@@ -214,36 +342,17 @@ let copy_file_aux ?chmod ~src ~dst () =
     (try Unix.unlink dst with Unix.Unix_error _ -> ());
     internal_error "Cannot copy %s to %s (%s)." src dst (Printexc.to_string e)
 
-let chdir dir =
-  try Unix.chdir dir
-  with Unix.Unix_error _ -> raise (File_not_found dir)
-
-let in_dir dir fn =
-  let reset_cwd =
-    let cwd =
-      try Some (Sys.getcwd ())
-      with Sys_error _ -> None in
-    fun () ->
-      match cwd with
-      | None     -> ()
-      | Some cwd -> try chdir cwd with File_not_found _ -> () in
-  chdir dir;
-  try
-    let r = fn () in
-    reset_cwd ();
-    r
-  with e ->
-    OpamStd.Exn.finalise e reset_cwd
-
 let list kind dir =
-  try
-    in_dir dir (fun () ->
-      let d = Sys.readdir (Sys.getcwd ()) in
-      let d = Array.to_list d in
-      let l = List.filter kind d in
-      List.map (Filename.concat dir) (List.sort compare l)
-    )
-  with File_not_found _ -> []
+  let d = try Sys.readdir dir with Sys_error _ -> [||] in
+  let filtered =
+    Array.fold_left
+      (fun acc base ->
+         let path = Filename.concat dir base in
+         if kind path then path::acc else acc)
+      []
+      d
+  in
+  List.sort String.compare filtered
 
 let ls dir = list (fun _ -> true) dir
 
@@ -256,31 +365,54 @@ let files_all_not_dir =
 let directories_strict =
   list (fun f -> try Sys2.is_directory f with Sys_error _ -> false)
 
-let directories_with_links =
-  list (fun f -> try Sys.is_directory f with Sys_error _ -> false)
+let directories_with_links ?(except_vcs=false) =
+  list (fun f ->
+  if except_vcs && is_vcs (Filename.basename f) then false else
+  try Sys.is_directory f with Sys_error _ -> false)
 
-let rec_files dir =
+let rec_files ?(except_vcs=false) dir =
+  log ~level:4 "scan files recursively (except_vcs: %b) in %s" except_vcs dir;
   let rec aux accu dir =
-    let d = directories_with_links dir in
+    let d = directories_with_links ~except_vcs dir in
     let f = files_with_links dir in
     List.fold_left aux (f @ accu) d in
   aux [] dir
 
 let files dir =
+  log ~level:4 "scan files in %s" dir;
   files_with_links dir
 
 let rec_dirs dir =
+  log ~level:4 "scan dirs recursively in %s" dir;
   let rec aux accu dir =
     let d = directories_with_links dir in
     List.fold_left aux (d @ accu) d in
   aux [] dir
 
 let dirs dir =
+  log ~level:4 "scan dirs in %s" dir;
   directories_with_links dir
 
 let dir_is_empty dir =
-  try in_dir dir (fun () -> Sys.readdir (Sys.getcwd ()) = [||])
-  with File_not_found _ -> false
+  try
+    let dir = Unix.opendir dir in
+    Fun.protect ~finally:(fun () -> Unix.closedir dir) @@ fun () ->
+    let rec loop () =
+      match Unix.readdir dir with
+      | "." | ".." -> loop ()
+      | _ -> false
+      | exception End_of_file -> true
+    in
+    Some (loop ())
+  with Unix.Unix_error(Unix.ENOENT, _, _) -> None
+
+let rec rmdir_cleanup dirname =
+  if dir_is_empty dirname = Some true then (
+    remove_dir dirname;
+    let parent = Filename.dirname dirname in
+    if parent <> (dirname : string) then
+      rmdir_cleanup parent
+  )
 
 let with_tmp_dir fn =
   let dir = mk_temp_dir () in
@@ -298,67 +430,33 @@ let with_tmp_dir_job fjob =
   mkdir dir;
   OpamProcess.Job.finally (fun () -> remove_dir dir) (fun () -> fjob dir)
 
+let rec with_tmp_file fn =
+  let file = temp_name () in
+  if Sys.file_exists file then
+    with_tmp_file fn
+  else
+    try
+      let e = fn file in
+      remove_file file;
+      e
+    with e ->
+      OpamStd.Exn.finalise e @@ fun () ->
+      remove_file file
+
+let rec with_tmp_file_job fjob =
+  let file = temp_name () in
+  if Sys.file_exists file then
+    with_tmp_file_job fjob
+  else
+    OpamProcess.Job.finally (fun () -> remove_file file) (fun () -> fjob file)
+
 let remove file =
   if (try Sys2.is_directory file with Sys_error _ -> false) then
     remove_dir file
   else
     remove_file file
 
-(* Sets path to s and returns the old path *)
-let getchdir s =
-  let p =
-    try Sys.getcwd ()
-    with Sys_error _ ->
-      let p = OpamCoreConfig.(!r.log_dir) in
-      mkdir p; p
-  in
-  chdir s;
-  p
-
-let normalize s =
-  try getchdir (getchdir s) with File_not_found _ -> s
-
-let real_path p =
-  (* if Filename.is_relative p then *)
-    match (try Some (Sys.is_directory p) with Sys_error _ -> None) with
-    | None ->
-      let rec resolve dir =
-        if Sys.file_exists dir then normalize dir else
-        let parent = Filename.dirname dir in
-        if dir = parent then dir
-        else Filename.concat (resolve parent) (Filename.basename dir)
-      in
-      let p =
-        if Filename.is_relative p then Filename.concat (Sys.getcwd ()) p
-        else p
-      in
-      resolve p
-    | Some true -> normalize p
-    | Some false ->
-      let dir = normalize (Filename.dirname p) in
-      match Filename.basename p with
-      | "." -> dir
-      | base -> dir / base
-  (* else p *)
-
 type command = string list
-
-let default_env =
-  Unix.environment ()
-
-let env_var env var =
-  let len = Array.length env in
-  let f = if Sys.win32 then String.uppercase_ascii else fun x -> x in
-  let prefix = f var^"=" in
-  let pfxlen = String.length prefix in
-  let rec aux i =
-    if i >= len then "" else
-    let s = env.(i) in
-    if OpamStd.String.starts_with ~prefix (f s) then
-      String.sub s pfxlen (String.length s - pfxlen)
-    else aux (i+1)
-  in
-  aux 0
 
 let forward_to_back =
   if Sys.win32 then
@@ -372,132 +470,86 @@ let back_to_forward =
   else
     fun x -> x
 
-(* OCaml 4.05.0 no longer follows the updated PATH to resolve commands. This
-   makes unqualified commands absolute as a workaround. *)
-let t_resolve_command =
-  let is_external_cmd name =
-    let name = forward_to_back name in
-    OpamStd.String.contains_char name Filename.dir_sep.[0]
-  in
-  let check_perms =
-    if Sys.win32 then fun f ->
-      try (Unix.stat f).Unix.st_kind = Unix.S_REG
-      with e -> OpamStd.Exn.fatal e; false
-    else fun f ->
-      try
-        let open Unix in
-        let uid = geteuid () in
-        let groups = OpamStd.IntSet.of_list (getegid () :: Array.to_list (getgroups ())) in
-        let {st_uid; st_gid; st_perm; _} = stat f in
-        let mask =
-          if uid = st_uid then
-            0o100
-          else if OpamStd.IntSet.mem st_gid groups then
-            0o010
-          else
-            0o001
-        in
-        if (st_perm land mask) <> 0 then
-          true
-        else
-          match OpamACL.get_acl_executable_info f st_uid with
-          | None -> false
-          | Some [] -> true
-          | Some gids -> OpamStd.IntSet.(not (is_empty (inter (of_list gids) groups)))
-      with e -> OpamStd.Exn.fatal e; false
-  in
-  let resolve ?dir env name =
-    if not (Filename.is_relative name) then begin
-      (* absolute path *)
-      if not (Sys.file_exists name) then `Not_found
-      else if not (check_perms name) then `Denied
-      else `Cmd name
-    end else if is_external_cmd name then begin
-      (* relative path *)
-      let cmd = match dir with
-        | None -> name
-        | Some d -> Filename.concat d name
-      in
-      if not (Sys.file_exists cmd) then `Not_found
-      else if not (check_perms cmd) then `Denied
-      else `Cmd cmd
-    end else
-    (* bare command, lookup in PATH *)
-    (* Following the shell sematics for looking up PATH, programs with the
-       expected name but not the right permissions are skipped silently.
-       Therefore, only two outcomes are possible in that case, [`Cmd ..] or
-       [`Not_found]. *)
-    let path = OpamStd.Sys.split_path_variable (env_var env "PATH") in
-    let name =
-      if Sys.win32 && not (Filename.check_suffix name ".exe") then
-        name ^ ".exe"
-      else name
-    in
-    let possibles = OpamStd.List.filter_map (fun path ->
-        let candidate = Filename.concat path name in
-        if Sys.file_exists candidate then Some candidate else None) path
-    in
-    match List.find check_perms possibles with
-    | cmdname -> `Cmd cmdname
-    | exception Not_found ->
-      if possibles = [] then
-        `Not_found
-      else
-        `Denied
-  in
-  fun ?(env=default_env) ?dir name ->
-    resolve env ?dir name
+let resolve_command = OpamProcess.resolve_command
 
-let resolve_command ?env ?dir name =
-  match t_resolve_command ?env ?dir name with
-  | `Cmd cmd -> Some cmd
-  | `Denied | `Not_found -> None
+let bin_contains_bash =
+  if not Sys.win32 && not Sys.cygwin then fun _ -> false else
+  fun bin ->
+    (resolve_command ~env:[||] (Filename.concat bin "bash.exe"))
+    <> None
 
 let apply_cygpath name =
-  let r =
-    OpamProcess.run
-      (OpamProcess.command ~name:(temp_file "command") ~verbose:false "cygpath" ["--"; name])
-  in
-  OpamProcess.cleanup ~force:true r;
-  if OpamProcess.is_success r then
-    List.hd r.OpamProcess.r_stdout
-  else
+  (* XXX Deeper bug, looking in the cygvoke code (see OpamProcess.create) *)
+  match resolve_command "cygpath" with
+  | Some cygpath ->
+    let r =
+      OpamProcess.run
+        (OpamProcess.command ~name:(temp_file "command")
+           ~allow_stdin:false ~verbose:false cygpath ["--"; name])
+    in
+    OpamProcess.cleanup ~force:true r;
+    if OpamProcess.is_success r then
+      match r.OpamProcess.r_stdout with
+      | l::_ -> l
+      | _ -> ""
+    else
+      OpamConsole.error_and_exit `Internal_error "Could not apply cygpath to %s" name
+  | None ->
     OpamConsole.error_and_exit `Internal_error "Could not apply cygpath to %s" name
 
 let get_cygpath_function =
   if Sys.win32 then
     fun ~command ->
-      lazy (if OpamStd.(Option.map_default Sys.is_cygwin_variant `Native (resolve_command command)) = `Cygwin then
-              apply_cygpath
-            else
-              fun x -> x)
+      lazy (
+        if OpamStd.Option.map_default
+            (OpamStd.Sys.is_cygwin_variant
+               ?search_in_first:(OpamCoreConfig.(!r.cygbin)))
+               false
+               (resolve_command command) then
+          apply_cygpath
+        else fun x -> x
+      )
   else
     let f = Lazy.from_val (fun x -> x) in
     fun ~command:_ -> f
 
-let runs = ref []
-let print_stats () =
-  match !runs with
-  | [] -> ()
-  | l  ->
-    OpamConsole.msg "%d external processes called:\n%s"
-      (List.length l) (OpamStd.Format.itemize ~bullet:"  " (String.concat " ") l)
+let apply_cygpath_path_transform ~pathlist cygpath path =
+  let args = if pathlist then [ "--path" ] else [] in
+  let r =
+    OpamProcess.run
+      (OpamProcess.command ~name:(temp_file "command") ~verbose:false
+         cygpath (args @ ["--"; path]))
+  in
+  OpamProcess.cleanup ~force:true r;
+  if OpamProcess.is_success r then
+    List.hd r.OpamProcess.r_stdout
+  else
+    OpamConsole.error_and_exit `Internal_error "Could not apply cygpath --path to %s" path
+
+let get_cygpath_path_transform =
+  (* We are running in a functioning Cygwin or MSYS2 environment if and only
+     if `cygpath` is in the PATH. *)
+  if Sys.win32 then
+    lazy (
+      match resolve_command "cygpath" with
+      | Some cygpath -> apply_cygpath_path_transform cygpath
+      | None -> fun ~pathlist:_ x -> x)
+  else
+    Lazy.from_val (fun ~pathlist:_ x -> x)
 
 let log_file ?dir name = temp_file ?dir (OpamStd.Option.default "log" name)
 
 let make_command
-    ?verbose ?(env=default_env) ?name ?text ?metadata ?allow_stdin ?stdout
+    ?verbose ?env ?name ?text ?metadata ?allow_stdin ?stdout
     ?dir ?(resolve_path=true)
     cmd args =
+  let env = match env with None -> OpamProcess.default_env () | Some e -> e in
   let name = log_file name in
   let verbose =
     OpamStd.Option.default OpamCoreConfig.(!r.verbose_level >= 2) verbose
   in
-  (* Check that the command doesn't contain whitespaces *)
-  if None <> try Some (String.index cmd ' ') with Not_found -> None then
-    OpamConsole.warning "Command %S contains space characters" cmd;
   let full_cmd =
-    if resolve_path then t_resolve_command ~env ?dir cmd
+    if resolve_path then OpamStd.Sys.resolve_command ~env ?dir cmd
     else `Cmd cmd
   in
   match full_cmd with
@@ -509,17 +561,13 @@ let make_command
   | `Denied -> permission_denied cmd
 
 let run_process
-    ?verbose ?(env=default_env) ~name ?metadata ?stdout ?allow_stdin command =
+    ?verbose ?env ~name ?metadata ?dir ?stdout ?allow_stdin command =
+  let env = match env with None -> OpamProcess.default_env () | Some e -> e in
   let chrono = OpamConsole.timer () in
-  runs := command :: !runs;
   match command with
   | []          -> invalid_arg "run_process"
   | cmd :: args ->
-
-    if OpamStd.String.contains_char cmd ' ' then
-      OpamConsole.warning "Command %S contains space characters" cmd;
-
-    match t_resolve_command ~env cmd with
+    match OpamStd.Sys.resolve_command ~env cmd with
     | `Cmd full_cmd ->
       let verbose = match verbose with
         | None   -> OpamCoreConfig.(!r.verbose_level) >= 2
@@ -528,7 +576,7 @@ let run_process
       let r =
         OpamProcess.run
           (OpamProcess.command
-             ~env ~name ~verbose ?metadata ?allow_stdin ?stdout
+             ~env ~name ~verbose ?metadata ?dir ?allow_stdin ?stdout
              full_cmd args)
       in
       let str = String.concat " " (cmd :: args) in
@@ -539,15 +587,15 @@ let run_process
     | `Not_found -> command_not_found cmd
     | `Denied -> permission_denied cmd
 
-let command ?verbose ?env ?name ?metadata ?allow_stdin cmd =
+let command ?verbose ?env ?name ?metadata ?dir ?allow_stdin cmd =
   let name = log_file name in
-  let r = run_process ?verbose ?env ~name ?metadata ?allow_stdin cmd in
+  let r = run_process ?verbose ?env ~name ?metadata ?dir ?allow_stdin cmd in
   OpamProcess.cleanup r;
   raise_on_process_error r
 
-let commands ?verbose ?env ?name ?metadata ?(keep_going=false) commands =
+let commands ?verbose ?env ?name ?metadata ?dir ?(keep_going=false) commands =
   let name = log_file name in
-  let run = run_process ?verbose ?env ~name ?metadata in
+  let run = run_process ?verbose ?env ~name ?metadata ?dir in
   let command r0 c =
     match r0, keep_going with
     | (`Error _ | `Exception _), false -> r0
@@ -565,11 +613,13 @@ let commands ?verbose ?env ?name ?metadata ?(keep_going=false) commands =
   | `Error e -> process_error e
   | `Exception e -> raise e
 
-let read_command_output ?verbose ?env ?metadata ?allow_stdin cmd =
+let read_command_output ?verbose ?env ?metadata ?dir ?allow_stdin
+    ?(ignore_stderr=false) cmd =
   let name = log_file None in
+  let stdout = name ^ (if ignore_stderr then ".stdout" else ".out") in
   let r =
-    run_process ?verbose ?env ~name ?metadata ?allow_stdin
-      ~stdout:(name^".out")
+    run_process ?verbose ?env ~name ?metadata ?dir ?allow_stdin
+      ~stdout
       cmd
   in
   OpamProcess.cleanup r;
@@ -579,13 +629,7 @@ let read_command_output ?verbose ?env ?metadata ?allow_stdin cmd =
 let verbose_for_base_commands () =
   OpamCoreConfig.(!r.verbose_level) >= 3
 
-let cygify f =
-  if Sys.win32 then
-    List.map (Lazy.force f)
-  else
-    fun x -> x
-
-let copy_file src dst =
+let copy_file_t ?(with_log=true) src dst =
   if (try Sys.is_directory src
       with Sys_error _ -> raise (File_not_found src))
   then internal_error "Cannot copy %s: it is a directory." src;
@@ -594,30 +638,73 @@ let copy_file src dst =
   if file_or_symlink_exists dst
   then remove_file dst;
   mkdir (Filename.dirname dst);
-  log "copy %s -> %s" src dst;
+  log ~level:(log_for_file_management with_log) "copy %s -> %s" src dst;
   copy_file_aux ~src ~dst ()
 
-let copy_dir src dst =
-  if Sys.file_exists dst then
-    if Sys.is_directory dst then
-      match ls src with
-      | [] -> ()
-      | srcfiles ->
-        command ~verbose:(verbose_for_base_commands ())
-          ([ "cp"; "-PRp" ] @ srcfiles @ [ dst ])
-    else internal_error "Can not copy dir %s to %s, which is not a directory"
-        src dst
-  else
-    (mkdir (Filename.dirname dst);
-     command ~verbose:(verbose_for_base_commands ())
-       [ "cp"; "-PRp"; src; dst ])
+let rec link_t ~except_vcs ?(with_log=true) src dst =
+  mkdir (Filename.dirname dst);
+  if file_or_symlink_exists dst then
+    remove_file dst;
+  try
+    log ~level:(log_for_file_management with_log) "ln -s %s %s" src dst;
+    Unix.symlink src dst
+  with Unix.Unix_error (Unix.EXDEV, _, _) ->
+    (* Fall back to copy if symlinks are not supported *)
+    let src =
+      if Filename.is_relative src then Filename.dirname dst / src
+      else src
+    in
+    if Sys.is_directory src then
+      copy_dir_t ~except_vcs src dst
+    else
+      copy_file_t src dst
 
-let mv_aux f src dst =
+and copy_dir_t ~except_vcs ?(with_log=true) src dst_dir =
+  log ~level:(log_for_file_management with_log) "copydir %s -> %s" src dst_dir;
+  let files = get_files_t ~except_vcs src in
+  mkdir dst_dir;
+  let with_log = false in
+  List.iter (fun file ->
+      let src = Filename.concat src file in
+      let dst = Filename.concat dst_dir file in
+      match Unix.lstat src with
+      | {Unix.st_kind = Unix.S_REG; _} ->
+        copy_file_t ~with_log src dst
+      | {Unix.st_kind = Unix.S_DIR; _} ->
+        copy_dir_t ~except_vcs ~with_log src dst
+      | {Unix.st_kind = Unix.S_LNK; _} ->
+        let src = Unix.readlink src in
+        link_t ~except_vcs ~with_log src dst
+      | {Unix.st_kind = Unix.S_CHR; _} ->
+        failwith (Printf.sprintf "Copying character devices (%s) is unsupported" src)
+      | {Unix.st_kind = Unix.S_BLK; _} ->
+        failwith (Printf.sprintf "Copying block devices (%s) is unsupported" src)
+      | {Unix.st_kind = Unix.S_FIFO; _} ->
+        failwith (Printf.sprintf "Copying named pipes (%s) is unsupported" src)
+      | {Unix.st_kind = Unix.S_SOCK; _} ->
+        failwith (Printf.sprintf "Copying sockets (%s) is unsupported" src)
+      | exception Unix.(Unix_error (ENOENT, _, _)) when Sys.win32 ->
+        (* This is usually caused by invalid symlinks extracted by a
+           Cygwin/MSYS2 tar. *)
+        OpamConsole.warning "Warning: cannot copy %s to %s" src dst_dir
+    ) files
+
+let copy_dir = copy_dir_t ~except_vcs:false ~with_log:true
+let copy_dir_except_vcs = copy_dir_t ~except_vcs:true ~with_log:true
+let copy_file = copy_file_t ~with_log:true
+
+let mv src dst =
   if file_or_symlink_exists dst then remove_file dst;
   mkdir (Filename.dirname dst);
-  command ~verbose:(verbose_for_base_commands ()) ("mv"::(cygify f [src; dst]))
-
-let mv = mv_aux (get_cygpath_function ~command:"mv")
+  log "mv %s -> %s" src dst;
+  try
+    Unix.rename src dst
+  with
+  | Unix.Unix_error(Unix.EXDEV, _, _) ->
+    let with_log = false in
+    if Sys.is_directory src
+    then (copy_dir_t ~except_vcs:false ~with_log src dst; remove_dir_t src)
+    else (copy_file_t ~with_log src dst; remove_file_t ~with_log src)
 
 let is_exec file =
   let stat = Unix.stat file in
@@ -649,8 +736,10 @@ let classify_executable file =
         let is_pe =
           try
             (* Offset to PE header at 0x3c (but we've already read two bytes) *)
-            ignore (really_input_string c 0x3a);
-            ignore (really_input_string c (input_int_little c - 0x40));
+            let _ : string = really_input_string c 0x3a in
+            let _ : string =
+              really_input_string c (input_int_little c - 0x40)
+            in
             let magic = really_input_string c 4 in
             magic = "PE\000\000"
           with End_of_file ->
@@ -668,7 +757,7 @@ let classify_executable file =
               | _ ->
                   raise End_of_file
             in
-            ignore (really_input_string c 14);
+            let _ : string = really_input_string c 14 in
             let size_of_opt_header = input_short_little c in
             let characteristics = input_short_little c in
             (* Executable images must have a PE "optional" header and be marked executable *)
@@ -693,21 +782,33 @@ let classify_executable file =
     `Unknown
 
 let default_install_warning dst = function
-| `Add_exe ->
+  | `Add_exe ->
     OpamConsole.warning "Automatically adding .exe to %s" dst
-| `Install_dll ->
-    (* TODO Installation of .dll to bin is unfortunate, but not sure if it should be a warning *)
+  | `Install_dll ->
+    (* TODO Installation of .dll to bin is unfortunate, but not sure if it
+       should be a warning *)
     ()
-| `Install_script ->
+  | `Install_script ->
     (* TODO Generate a .cmd wrapper (and warn about it - they're not perfect) *)
     OpamConsole.warning "%s is a script; the command won't be available" dst;
-| `Install_unknown ->
-    (* TODO Installation of a non-executable file is unexpected, but not sure if it should be a warning/error *)
+  | `Install_unknown ->
+    (* TODO Installation of a non-executable file is unexpected, but not sure
+       if it should be a warning/error *)
     ()
-| `Cygwin ->
+  | `Cygwin ->
     OpamConsole.warning "%s is a Cygwin-linked executable" dst
-| `Cygwin_libraries ->
-    OpamConsole.warning "%s links with a Cygwin-compiled DLL (almost certainly a packaging or environment error)" dst
+  | `Msys2 ->
+    OpamConsole.warning "%s is a MSYS2-linked executable" dst
+  | `Tainted `Cygwin ->
+    OpamConsole.warning
+      "%s is an executable which links to a Cygwin-linked library" dst
+  | `Tainted `Msys2 ->
+    OpamConsole.warning
+      "%s is an executable which links to a MSYS2-linked library" dst
+  | `Cygwin_libraries ->
+    OpamConsole.warning
+      "%s links with a Cygwin-compiled DLL (almost certainly a packaging \
+       or environment error)" dst
 
 let install ?(warning=default_install_warning) ?exec src dst =
   if Sys.is_directory src then
@@ -718,58 +819,46 @@ let install ?(warning=default_install_warning) ?exec src dst =
   let exec = match exec with
     | Some e -> e
     | None -> is_exec src in
-  begin
-    if Sys.win32 then
-      if exec then begin
-        let (dst, cygcheck) =
-          match classify_executable src with
-            `Exe _ ->
-              if not (Filename.check_suffix dst ".exe") && not (Filename.check_suffix dst ".dll") then begin
-                warning dst `Add_exe;
-                (dst ^ ".exe", true)
-              end else
-                (dst, true)
-          | `Dll _ ->
-              warning dst `Install_dll;
+  let perm = if exec then 0o755 else 0o644 in
+  log "install %s -> %s (%o)" src dst perm;
+  if Sys.win32 then
+    if exec then begin
+      let (dst, cygcheck) =
+        match classify_executable src with
+          `Exe _ ->
+            if not (Filename.check_suffix dst ".exe") && not (Filename.check_suffix dst ".dll") then begin
+              warning dst `Add_exe;
+              (dst ^ ".exe", true)
+            end else
               (dst, true)
-          | `Script ->
-              warning dst `Install_script;
-              (dst, false)
-          | `Unknown ->
-              warning dst `Install_unknown;
-              (dst, false)
-        in
-        copy_file_aux ~src ~dst ();
-        if cygcheck then
-          match OpamStd.Sys.is_cygwin_variant dst with
-            `Native ->
-              ()
-          | `Cygwin ->
-              warning dst `Cygwin
-          | `CygLinked ->
-              warning dst `Cygwin_libraries
-      end else
-        copy_file_aux ~src ~dst ()
-    else (
-      let perm = if exec then 0o755 else 0o644 in
-      log "install %s -> %s (%o)" src dst perm;
-      copy_file_aux ~chmod:(fun _ -> perm) ~src ~dst ()
-    )
-  end
+        | `Dll _ ->
+            warning dst `Install_dll;
+            (dst, true)
+        | `Script ->
+            warning dst `Install_script;
+            (dst, false)
+        | `Unknown ->
+            warning dst `Install_unknown;
+            (dst, false)
+      in
+      copy_file_aux ~src ~dst ();
+      if cygcheck then
+        match OpamStd.Sys.get_windows_executable_variant
+                ?search_in_first:OpamCoreConfig.(!r.cygbin) dst with
+        | `Native -> ()
+        | (`Cygwin | `Msys2 | `Tainted _) as code -> warning dst code
+    end else
+      copy_file_aux ~src ~dst ()
+  else
+    copy_file_aux ~chmod:(fun _ -> perm) ~src ~dst ()
 
 let cpu_count () =
-  try
-    let ans =
-      let open OpamStd in
-      match Sys.os () with
-      | Sys.Win32 -> [Env.get "NUMBER_OF_PROCESSORS"]
-      | Sys.FreeBSD -> read_command_output ~verbose:(verbose_for_base_commands ())
-                         ["sysctl"; "-n"; "hw.ncpu"]
-      | _ -> read_command_output ~verbose:(verbose_for_base_commands ())
-               ["getconf"; "_NPROCESSORS_ONLN"]
-    in
-    int_of_string (List.hd ans)
-  with Not_found | Process_error _ | Failure _ -> 1
+  let nproc = Nativeint.to_int (OpamStubs.nproc ()) in
+  if nproc < 1 then begin
+    log "OpamStubs.nproc failed";
+    1
+  end else
+    nproc
 
 open OpamProcess.Job.Op
 
@@ -817,23 +906,17 @@ module Tar = struct
   let match_ext file ext =
     List.exists (Filename.check_suffix file) ext
 
+  let get_archive_extension file =
+    OpamStd.List.find_map_opt (fun (ext, t) ->
+        if match_ext file ext then Some t else None)
+      extensions
+
   let get_type file =
-    let ext =
-      List.fold_left
-        (fun acc (ext, t) -> match acc with
-           | Some t -> Some t
-           | None   ->
-             if match_ext file ext
-             then Some t
-             else None)
-        None
-        extensions in
-    match ext with
-    | Some t -> Some t
-    | None   ->
-      match guess_type file with
-      | Some t -> Some t
-      | _ -> None
+    if Sys.file_exists file then guess_type file
+    else get_archive_extension file
+
+  let is_archive_from_string f =
+    get_archive_extension f <> None
 
   let is_archive file =
     get_type file <> None
@@ -867,36 +950,38 @@ module Tar = struct
           make_command tar_cmd [ Printf.sprintf "xf%c" c ; f file; "-C" ; f dir ]
         in
         command (extract_option typ))
-
-  let compress_command =
-    fun file dir ->
-      let f = Lazy.force cygpath_tar in
-      let tar_cmd = Lazy.force tar_cmd in
-      make_command tar_cmd [
-        "cfz"; f file;
-        "-C" ; f (Filename.dirname dir);
-        f (Filename.basename dir)
-      ]
-
 end
 
 module Zip = struct
+
+  let extension = "zip"
+
+  let is_archive_from_string file =
+    Filename.check_suffix file extension
+
   let is_archive f =
-    try
-      let ic = open_in f in
-      let c1 = input_char ic in
-      let c2 = input_char ic in
-      let c3 = input_char ic in
-      let c4 = input_char ic in
-      close_in ic;
-      match c1, c2, c3, c4 with
-      | '\x50', '\x4b', '\x03', '\x04' -> true
-      | _ -> false
-    with Sys_error _ | End_of_file -> false
+    if Sys.file_exists f then
+      try
+        let ic = open_in f in
+        let c1 = input_char ic in
+        let c2 = input_char ic in
+        let c3 = input_char ic in
+        let c4 = input_char ic in
+        close_in ic;
+        match c1, c2, c3, c4 with
+        | '\x50', '\x4b', '\x03', '\x04' -> true
+        | _ -> false
+      with Sys_error _ | End_of_file -> false
+    else
+      is_archive_from_string f
 
   let extract_command file =
     Some (fun dir -> make_command "unzip" [ file; "-d"; dir ])
 end
+
+let is_archive_from_string file =
+  Tar.is_archive_from_string file
+  || Zip.is_archive_from_string file
 
 let is_archive file =
   Tar.is_archive file || Zip.is_archive file
@@ -904,16 +989,6 @@ let is_archive file =
 let extract_command file =
   if Zip.is_archive file then Zip.extract_command file
   else Tar.extract_command file
-
-let make_tar_gz_job ~dir file =
-  let tmpfile = file ^ ".tmp" in
-  remove_file tmpfile;
-  Tar.compress_command tmpfile dir @@> fun r ->
-  OpamProcess.cleanup r;
-  if OpamProcess.is_success r then
-    (mv tmpfile file; Done None)
-  else
-    (remove_file tmpfile; Done (Some (Process_error r)))
 
 let extract_job ~dir file =
   if not (Sys.file_exists file) then
@@ -986,13 +1061,7 @@ let extract_in ~dir file =
   | None -> ()
 
 let link src dst =
-  mkdir (Filename.dirname dst);
-  if file_or_symlink_exists dst then
-    remove_file dst;
-  try
-    log "ln -s %s %s" src dst;
-    Unix.symlink src dst
-  with Unix.Unix_error (Unix.EXDEV, _, _) ->
+  let fallback () =
     (* Fall back to copy if symlinks are not supported *)
     let src =
       if Filename.is_relative src then Filename.dirname dst / src
@@ -1002,6 +1071,23 @@ let link src dst =
       copy_dir src dst
     else
       copy_file src dst
+  in
+  mkdir (Filename.dirname dst);
+  if file_or_symlink_exists dst then (
+    (* TODO: move this into remove_file *)
+    if Sys.win32 then Unix.chmod dst 0o640;
+    remove_file dst
+  );
+  if Unix.has_symlink () then
+    try
+      log "ln -s %s %s" src dst;
+      Unix.symlink src dst
+    with Unix.Unix_error (Unix.EXDEV, _, _) ->
+      fallback ()
+  else (
+    log "copy %s -> %s" src dst;
+    fallback ()
+  )
 
 type actual_lock_flag = [ `Lock_read | `Lock_write ]
 type lock_flag = [ `Lock_none | actual_lock_flag ]
@@ -1064,20 +1150,21 @@ let rec flock_update
          if Sys.win32 && kind <> `Lock_none then
            Unix.(lockf fd F_ULOCK 0);
          Unix.lockf fd (unix_lock_op ~dontblock:true flag) 0
-       with Unix.Unix_error (Unix.EAGAIN,_,_) ->
+       with Unix.Unix_error (Unix.EAGAIN,_,_)
+          | Unix.Unix_error (Unix.EACCES,_,_) ->
          if dontblock then
            OpamConsole.error_and_exit `Locked
              "Another process has locked %s and non blocking mode enabled"
              file;
-         OpamConsole.formatted_msg
+         OpamConsole.formatted_errmsg
            "Another process has locked %s, waiting (%s to abort)... "
            file (if Sys.win32 then "CTRL+C" else "C-c");
          let rec lock_w_ignore_sig () =
            try Unix.lockf fd (unix_lock_op ~dontblock:false flag) 0;
-           with Sys.Break as e -> (OpamConsole.msg "\n"; raise e)
+           with Sys.Break as e -> (OpamConsole.errmsg "\n"; raise e)
               | Unix.Unix_error (Unix.EINTR,_,_) -> lock_w_ignore_sig ()
          in lock_w_ignore_sig ();
-         OpamConsole.msg "lock acquired.\n");
+         OpamConsole.errmsg "lock acquired.\n");
     lock.kind <- (flag :> lock_flag)
   | _ -> assert false
 
@@ -1090,7 +1177,7 @@ and flock: 'a. ([< lock_flag ] as 'a) -> ?dontblock:bool -> string -> lock =
   | flag ->
     mkdir (Filename.dirname file);
     let rdflag = if (flag :> lock_flag) = `Lock_write then Unix.O_RDWR else Unix.O_RDONLY in
-    let fd = Unix.openfile file Unix.([O_CREAT; O_CLOEXEC; rdflag]) 0o666 in
+    let fd = Unix.openfile file Unix.([O_CREAT; O_CLOEXEC; O_SHARE_DELETE; rdflag]) 0o666 in
     Hashtbl.add locks fd ();
     let lock = { fd = Some fd; file; kind = `Lock_none } in
     flock_update flag ?dontblock lock;
@@ -1172,337 +1259,6 @@ let get_eol_encoding file =
       close_in ch;
       None
 
-let translate_patch ~dir orig corrected =
-  (* It's unnecessarily complicated to infer whether the entire file is CRLF
-     encoded and also the status of individual files, so accept scanning the
-     file three times instead of two. *)
-  let log ?level fmt = OpamConsole.log "PATCH" ?level fmt in
-  let strip_cr = get_eol_encoding orig = Some true in
-  let ch =
-    try open_in_bin orig
-    with Sys_error _ -> raise (File_not_found orig)
-  in
-  (* CRLF detection with patching can be more complicated than that used here,
-     especially in the presence of files with mixed LF/CRLF endings. The
-     processing done here aims to allow patching to succeed on files which are
-     wholly encoded CRLF or LF against patches which may have been translated to
-     be the opposite.
-
-     The resulting patch will *always* have LF line endings for the patch
-     metadata (headers, chunk locations, etc.) but uses either CRLF or LF
-     depending on the target file. Endings in the patch are always preserved for
-     new files. The benefit of always using LF endings for the metadata is that
-     patch's "Stripping trailing CRs from patch" behaviour won't be triggered.
-
-     There are various patch formats, though only the Unified and Context
-     formats allow multiple files to be patched. I tired of trying to get
-     sufficient documented detail of Context diffs to be able to parse them
-     without resorting to reverse-engineering code. It is unusual to see them
-     these days, so for now opam just emits a warning if a Context diff file is
-     encountered and does no processing to it.
-
-     There are various semantic aspects of Unified diffs which are not handled
-     (at least at present) by this function which are documented in the code
-     with the marker "Weakness". *)
-  let process_chunk_header result line =
-    match OpamStd.String.split line ' ' with
-    | "@@"::a::b::"@@"::_ ->
-        (* Weakness: for a new file [a] should always be -0,0 (not checked) *)
-        let l_a = String.length a in
-        let l_b = String.length b in
-        if l_a > 1 && l_b > 1 && a.[0] = '-' && b.[0] = '+' then
-          try
-            let f (_, v) = int_of_string v in
-            let neg =
-              OpamStd.String.cut_at (String.sub a 1 (l_a - 1)) ','
-                      |> OpamStd.Option.map_default f 1
-            in
-            let pos =
-              OpamStd.String.cut_at (String.sub b 1 (l_b - 1)) ','
-                      |> OpamStd.Option.map_default f 1
-            in
-            result neg pos
-          with e ->
-            OpamStd.Exn.fatal e;
-            (* TODO Should display some kind of re-sync warning *)
-            `Header
-        else
-          (* TODO Should display some kind of re-sync warning *)
-          `Header
-    | _ ->
-        (* TODO Should display some kind of warning that there were no chunks *)
-        `Header
-  in
-  let process_state_transition next_state state transforms =
-    match (state, next_state) with
-    | (`Processing _, `Processing _) ->
-        transforms
-    | (`Processing (_, target, crlf, patch_crlf, chunks, _), _) ->
-        let compute_transform patch_crlf =
-          (* Emit the patch *)
-          let transform =
-            match (crlf, patch_crlf) with
-            | (None, _)
-            | (_, None) ->
-                log ~level:3 "CRLF adaptation skipped for %s" target;
-                None
-            | (Some crlf, Some patch_crlf) ->
-                if crlf = patch_crlf then begin
-                  log ~level:3 "No CRLF adaptation necessary for %s" target;
-                  None
-                end else if crlf then begin
-                  log ~level:3 "Adding \\r to patch chunks for %s" target;
-                  Some true
-                end else begin
-                  log ~level:3 "Stripping \\r to patch chunks for %s" target;
-                  Some false
-                end
-          in
-          let record_transform transform =
-            let augment_record (first_line, last_line) =
-              (first_line, last_line, transform)
-            in
-            List.rev_append (List.rev_map augment_record chunks) transforms
-          in
-          OpamStd.Option.map_default record_transform transforms transform
-        in
-        OpamStd.Option.map_default compute_transform transforms patch_crlf
-     | _ ->
-        transforms
-  in
-  let rec fold_lines state n transforms =
-    match input_line ch with
-    | line ->
-        let line =
-          if strip_cr then
-            String.sub line 0 (String.length line - 1)
-          else
-            line
-        in
-        let length = String.length line in
-        let next_state =
-          match state with
-          | `Header ->
-            begin
-              match (if length > 4 then String.sub line 0 4 else "") with
-              | "--- " ->
-                  (* Start of a unified diff header. *)
-                  let file =
-                    let file = String.sub line 4 (length - 4) in
-                    let open OpamStd in
-                    Option.map_default fst file (String.cut_at file '\t')
-                  in
-                  (* Weakness: new files are also marked with a time-stamp at
-                               the start of the epoch, however it's localised,
-                               making it a bit tricky to identify! New files are
-                               also identified by their absence on disk, so this
-                               weakness isn't particularly critical. *)
-                  if file = "/dev/null" then
-                    `NewHeader
-                  else
-                    let target =
-                      OpamStd.String.cut_at (back_to_forward file) '/'
-                      |> OpamStd.Option.map_default snd file
-                      |> Filename.concat dir
-                    in
-                    if Sys.file_exists target then
-                      let crlf = get_eol_encoding target in
-                      `Patching (file, crlf)
-                    else
-                      `NewHeader
-              | "*** " ->
-                  OpamConsole.warning "File %s uses context diffs which are \
-                                       less portable; consider using unified \
-                                       diffs" orig;
-                  `SkipFile
-              | _ ->
-                  (* Headers will contain other lines, which are ignored (e.g.
-                     the diff command which generated the diff, or Git commit
-                     messages) *)
-                  `Header
-            end
-          | `NewHeader ->
-              if (if length > 4 then String.sub line 0 4 else "") = "+++ " then
-                `New
-              else
-                (* TODO Should display some kind of re-sync warning *)
-                `Header
-          | `New ->
-              process_chunk_header (fun neg pos -> `NewChunk (neg, pos))
-                                   line
-          | `NewChunk (neg, pos) ->
-              (* Weakness: new files should only have + lines *)
-              let neg =
-                if line = "" || line.[0] = ' ' || line.[0] = '-' then
-                  neg - 1
-                else
-                  neg
-              in
-              let pos =
-                if line = "" || line.[0] = ' ' || line.[0] = '+' then
-                  pos - 1
-                else
-                  pos
-              in
-              if neg = 0 && pos = 0 then
-                `New
-              else
-                (* Weakness: there should only be one chunk for a new file *)
-                `NewChunk (neg, pos)
-          | `Patching (orig, crlf) ->
-              if (if length > 4 then String.sub line 0 4 else "") = "+++ " then
-                let file =
-                  let file = String.sub line 4 (length - 4) in
-                  let open OpamStd in
-                  Option.map_default fst file (String.cut_at file '\t')
-                in
-                `Processing (orig, file, crlf, None, [], `Head)
-              else
-                `Header
-          | `Processing (orig, target, crlf, patch_crlf, chunks, `Head) ->
-              if line = "\\ No newline at end of file" then
-                (* If the no eol-at-eof indicator is found, never add \r to
-                   final chunk line *)
-                let chunks =
-                  match chunks with
-                  | (a, b)::chunks ->
-                      (a, b - 1)::chunks
-                  | _ ->
-                      chunks
-                in
-                `Processing (orig, target, crlf, patch_crlf, chunks, `Head)
-             else
-                process_chunk_header
-                  (fun neg pos ->
-                     `Processing (orig, target, crlf, patch_crlf, chunks,
-                                  `Chunk (succ n, neg, pos)))
-                  line
-          | `Processing (orig, target, crlf, patch_crlf, chunks,
-                         `Chunk (first_line, neg, pos)) ->
-              let neg =
-                if line = "" || line.[0] = ' ' || line.[0] = '-' then
-                  neg - 1
-                else
-                  neg
-              in
-              let pos =
-                if line = "" || line.[0] = ' ' || line.[0] = '+' then
-                  pos - 1
-                else
-                  pos
-              in
-              let patch_crlf =
-                let has_cr = (length > 0 && line.[length - 1] = '\r') in
-                match patch_crlf with
-                | None ->
-                    Some (Some has_cr)
-                | Some (Some think_cr) when think_cr <> has_cr ->
-                    log ~level:2 "Patch adaptation disabled for %s: \
-                                  mixed endings or binary file" target;
-                    Some None
-                | _ ->
-                    patch_crlf
-              in
-              if neg = 0 && pos = 0 then
-                let chunks = (first_line, n)::chunks in
-                `Processing (orig, target, crlf, patch_crlf, chunks, `Head)
-              else
-                `Processing (orig, target, crlf, patch_crlf, chunks,
-                             `Chunk (first_line, neg, pos))
-          | `SkipFile ->
-              `SkipFile
-        in
-        if next_state = `SkipFile then
-          []
-        else
-          process_state_transition next_state state transforms
-            |> fold_lines next_state (succ n)
-    | exception End_of_file ->
-        process_state_transition `Header state transforms |> List.rev
-  in
-  let transforms = fold_lines `Header 1 [] in
-  if transforms = [] then
-    copy_file orig corrected
-  else begin
-    seek_in ch 0;
-    let ch_out =
-      try open_out_bin corrected
-      with Sys_error _ ->
-        close_in ch;
-        raise (File_not_found corrected)
-    in
-    let (normal, add_cr, strip_cr) =
-      let strip n s = String.sub s 0 (String.length s - n) in
-      let id x = x in
-      if strip_cr then
-        (strip 1, id, strip 2)
-      else
-        (id, (fun s -> s ^ "\r"), strip 1)
-    in
-    if OpamConsole.debug () then
-      let log_transform (first_line, last_line, add_cr) =
-         let indicator = if add_cr then '+' else '-' in
-         log ~level:3 "Transform %d-%d %c\\r" first_line last_line indicator
-      in
-      List.iter log_transform transforms;
-    let rec fold_lines n transforms =
-      match input_line ch with
-      | line ->
-          let (f, transforms) =
-            match transforms with
-            | (first_line, last_line, add_cr_to_chunks)::next_transforms ->
-                let transforms =
-                  if n = last_line then
-                    next_transforms
-                  else
-                    transforms
-                in
-                let f =
-                  if n >= first_line then
-                    if add_cr_to_chunks then
-                      add_cr
-                    else
-                      strip_cr
-                  else
-                    normal
-                in
-                (f, transforms)
-             | [] ->
-                 (normal, [])
-          in
-          output_string ch_out (f line);
-          output_char ch_out '\n';
-          fold_lines (succ n) transforms
-      | exception End_of_file ->
-          close_out ch_out
-    in
-    fold_lines 1 transforms
-  end;
-  close_in ch
-
-let patch ?(preprocess=true) ~dir p =
-  if not (Sys.file_exists p) then
-    (OpamConsole.error "Patch file %S not found." p;
-     raise Not_found);
-  let p' =
-    if preprocess then
-      let p' = temp_file ~auto_clean:false "processed-patch" in
-      translate_patch ~dir p p';
-      p'
-    else
-      p
-  in
-  let patch_cmd =
-    match OpamStd.Sys.os () with
-    | OpamStd.Sys.OpenBSD
-    | OpamStd.Sys.FreeBSD -> "gpatch"
-    | _ -> "patch"
-  in
-  make_command ~name:"patch" ~dir patch_cmd ["-p1"; "-i"; p'] @@> fun r ->
-    if not (OpamConsole.debug ()) then Sys.remove p';
-    if OpamProcess.is_success r then Done None
-    else Done (Some (Process_error r))
-
 let register_printer () =
   Printexc.register_printer (function
     | Process_error r     -> Some (OpamProcess.result_summary r)
@@ -1523,6 +1279,3 @@ let init () =
   Sys.catch_break true;
   try Sys.set_signal Sys.sigpipe (Sys.Signal_handle (fun _ -> ()))
   with Invalid_argument _ -> ()
-
-let () =
-  OpamProcess.set_resolve_command resolve_command

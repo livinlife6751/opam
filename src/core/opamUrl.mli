@@ -50,6 +50,10 @@ val parse_opt:
 
 include OpamStd.ABSTRACT with type t := t
 
+(* [to_string_w_subpath subpath url] Return string of [url] with [subpath]
+   integrated *)
+val to_string_w_subpath: OpamFilename.SubPath.t option -> t -> string
+
 (** Dummy filler url *)
 val empty: t
 
@@ -66,6 +70,10 @@ val basename: t -> string
 val root: t -> t
 
 val has_trailing_slash: t -> bool
+
+(** Check if the URL looks like a local path and returns [Some url.path]
+    if it does. Return [None] otherwise. *)
+val looks_like_local_path: t -> string option
 
 (** Check if the URL matches an existing local directory, and return it *)
 val local_dir: t -> OpamFilename.Dir.t option

@@ -19,12 +19,8 @@ let repository_url = {
 }
 
 let default_compiler =
-  OpamFormula.ors [
-    OpamFormula.Atom (OpamPackage.Name.of_string "ocaml-system",
-                      OpamFormula.Empty);
-    OpamFormula.Atom (OpamPackage.Name.of_string "ocaml-base-compiler",
-                      OpamFormula.Empty);
-  ]
+  OpamFormula.Atom (OpamPackage.Name.of_string "ocaml-base-compiler",
+                    OpamFormula.Empty)
 
 let default_invariant =
   OpamFormula.Atom
@@ -32,16 +28,12 @@ let default_invariant =
      OpamFormula.Atom
        (`Geq, OpamPackage.Version.of_string "4.05.0"))
 
-let eval_variables = [
+let sys_ocaml_version =
   OpamVariable.of_string "sys-ocaml-version", ["ocamlc"; "-vnum"],
-  "OCaml version present on your system independently of opam, if any";
-  OpamVariable.of_string "sys-ocaml-arch", ["sh"; "-c"; "ocamlc -config | tr -d '\\r' | grep '^architecture: ' | sed -e 's/.*: //' -e 's/i386/i686/' -e 's/amd64/x86_64/'"],
-  "Target architecture of the OCaml compiler present on your system";
-  OpamVariable.of_string "sys-ocaml-cc", ["sh"; "-c"; "ocamlc -config | tr -d '\\r' | grep '^ccomp_type: ' | sed -e 's/.*: //'"],
-  "Host C Compiler type of the OCaml compiler present on your system";
-  OpamVariable.of_string "sys-ocaml-libc", ["sh"; "-c"; "ocamlc -config | tr -d '\\r' | grep '^os_type: ' | sed -e 's/.*: //' -e 's/Win32/msvc/' -e '/^msvc$/!s/.*/libc/'"],
-  "Host C Runtime Library type of the OCaml compiler present on your system";
-]
+  "OCaml version present on your system independently of opam, if any"
+
+let eval_variables =
+  sys_ocaml_version :: OpamEnv.sys_ocaml_eval_variables
 
 let os_filter os =
   FOp (FIdent ([], OpamVariable.of_string "os", None), `Eq, FString os)
@@ -50,18 +42,17 @@ let linux_filter = os_filter "linux"
 let macos_filter = os_filter "macos"
 let openbsd_filter = os_filter "openbsd"
 let freebsd_filter = os_filter "freebsd"
-let not_open_free_bsd_filter =
-  FNot (FOr (openbsd_filter,  freebsd_filter))
-let win32_filter = os_filter "win32"
+let netbsd_filter = os_filter "netbsd"
+let dragonflybsd_filter = os_filter "dragonfly"
+let not_bsd_filter =
+  FNot (FOr (FOr (openbsd_filter, netbsd_filter),
+             FOr (freebsd_filter, dragonflybsd_filter)))
+let not_win32_filter =
+  FOp (FIdent ([], OpamVariable.of_string "os", None), `Neq, FString "win32")
 let sandbox_filter = FOr (linux_filter, macos_filter)
-
-let gpatch_filter = FOr (openbsd_filter, freebsd_filter)
-let patch_filter = FNot gpatch_filter
 
 let gtar_filter = openbsd_filter
 let tar_filter = FNot gtar_filter
-
-let getconf_filter = FNot (FOr (win32_filter, freebsd_filter))
 
 let sandbox_wrappers =
   let cmd t = [
@@ -94,21 +85,21 @@ let req_dl_tools () =
   let msg =
     Some "A download tool is required, check env variables OPAMCURL or OPAMFETCH"
   in
+  (* Keep synchronised with [OpamRepositoryConfig.default] *)
   let default =
     [
-      ["curl"; "wget"], msg, Some not_open_free_bsd_filter;
-      ["fetch"], msg, Some freebsd_filter;
-      ["ftp"], msg, Some openbsd_filter
+      (* BSDs have download tools (fetch or ftp) that are part of the
+         base system so there is no need to check for those tools. *)
+      ["curl"; "wget"], msg, Some not_bsd_filter;
     ]
   in
   let open OpamStd.Option.Op in
   let cmd =
-    (OpamStd.Env.getopt "OPAMFETCH"
-     >>= fun s ->
-     match OpamStd.String.split s ' ' with
+    (OpamRepositoryConfig.E.fetch_t ()
+     >>= function
      | c::_ -> Some c
      | _ -> None)
-    >>+ fun () -> OpamStd.Env.getopt "OPAMCURL"
+    >>+ fun () -> OpamRepositoryConfig.E.curl_t ()
   in
   match cmd with
   | Some cmd ->
@@ -117,32 +108,36 @@ let req_dl_tools () =
 
 let dl_tool () =
   let open OpamStd.Option.Op in
-  (OpamStd.Env.getopt "OPAMFETCH"
-   >>+ fun () -> OpamStd.Env.getopt "OPAMCURL")
-  >>| fun cmd -> [(CString cmd), None]
+  (OpamRepositoryConfig.E.fetch_t ()
+   >>+ fun () -> Option.map (fun x -> [x]) (OpamRepositoryConfig.E.curl_t ()))
+  >>| fun cmd -> List.map (fun x -> (CString x, None)) cmd
 
 let recommended_tools () =
   let make = OpamStateConfig.(Lazy.force !r.makecmd) in
   [
     [make], None, None;
-    ["cc"], None, None;
+    ["cc"], None, Some not_win32_filter;
   ]
 
 let required_tools ~sandboxing () =
   req_dl_tools () @
   [
-    ["diff"], None, None;
-    ["patch"], None, Some patch_filter;
-    ["gpatch"], None, Some gpatch_filter;
     ["tar"], None, Some tar_filter;
     ["gtar"], None, Some gtar_filter;
     ["unzip"], None, None;
-    ["getconf"], None, Some getconf_filter;
   ] @
   if sandboxing then [
     [bwrap_cmd], Some (bwrap_string()), Some bwrap_filter;
     ["sandbox-exec"], None, Some macos_filter;
   ] else []
+
+let required_packages_for_cygwin =
+  [
+    "make";
+    "tar";
+    "unzip";
+    "rsync";
+  ] |> List.map OpamSysPkg.of_string
 
 let init_scripts () = [
   ("sandbox.sh", OpamScript.bwrap), Some bwrap_filter;

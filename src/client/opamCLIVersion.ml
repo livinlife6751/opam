@@ -8,23 +8,25 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
-
 type t = int * int
 
-let supported_versions = [(2, 0); (2, 1)]
+let supported_versions = [(2, 0); (2, 1); (2,2); (2,3); (2,4); (2,5)]
 
-let is_supported v = List.mem v supported_versions
+let is_supported v =
+  OpamStd.List.mem (OpamCompat.Pair.equal Int.equal Int.equal)
+    v supported_versions
 
 let of_string s =
   match String.index s '.' with
   | i when s.[0] <> '0' && (i >= String.length s - 2 || s.[i + 1] <> '0') ->
     begin
       try Scanf.sscanf s "%u.%u%!" (fun major minor -> (major, minor))
-      with Scanf.Scan_failure _ -> failwith "OpamVersion.CLI.of_string"
+      with Scanf.Scan_failure _ ->
+        Printf.ksprintf failwith "OpamVersion.CLI.of_string: %s" s
     end
-  | exception Not_found -> failwith "OpamVersion.CLI.of_string"
-  | _ -> failwith "OpamVersion.CLI.of_string"
+  | exception Not_found ->
+     Printf.ksprintf failwith "OpamVersion.CLI.of_string: %s" s
+  | _ -> Printf.ksprintf failwith "OpamVersion.CLI.of_string: %s" s
 
 let current = of_string @@ OpamVersion.(to_string current_nopatch)
 
@@ -43,6 +45,11 @@ let of_json = function
 
 let ( >= ) = Stdlib.( >= )
 let ( < ) = Stdlib.( < )
+let compare (vm, vn) (wm, wn) =
+  let major = Int.compare vm wm in
+  if major <> 0 then major else
+    Int.compare vn wn
+let equal v w = compare v w = 0
 
 let previous cli =
   let f previous version =

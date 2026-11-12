@@ -23,6 +23,7 @@ module E = struct
     | PREPRO of bool option
     | SOLVERALLOWSUBOPTIMAL of bool option
     | SOLVERTIMEOUT of float option
+    | SOLVERTOLERANCE of float option
     | UPGRADECRITERIA of string option
     | USEINTERNALSOLVER of bool option
     | VERSIONLAGPOWER of int option
@@ -42,6 +43,7 @@ module E = struct
   let solverallowsuboptimal =
     value (function SOLVERALLOWSUBOPTIMAL b -> b | _ -> None)
   let solvertimeout = value (function SOLVERTIMEOUT f -> f | _ -> None)
+  let solvertolerance = value (function SOLVERTOLERANCE f -> f | _ -> None)
   let useinternalsolver = value (function USEINTERNALSOLVER b -> b | _ -> None)
   let upgradecriteria = value (function UPGRADECRITERIA s -> s | _ -> None)
   let versionlagpower = value (function VERSIONLAGPOWER i -> i | _ -> None)
@@ -59,6 +61,7 @@ type t = {
   solver_preferences_fixup: string option Lazy.t;
   solver_preferences_best_effort_prefix: string option Lazy.t;
   solver_timeout: float option;
+  solver_tolerance: float option;
   solver_allow_suboptimal: bool;
   cudf_trim: string option;
   dig_depth: int;
@@ -75,6 +78,7 @@ type 'a options_fun =
   ?solver_preferences_fixup:string option Lazy.t ->
   ?solver_preferences_best_effort_prefix:string option Lazy.t ->
   ?solver_timeout:float option ->
+  ?solver_tolerance:float option ->
   ?solver_allow_suboptimal:bool ->
   ?cudf_trim:string option ->
   ?dig_depth:int ->
@@ -95,6 +99,7 @@ let default =
     solver_preferences_fixup = lazy None;
     solver_preferences_best_effort_prefix = lazy None;
     solver_timeout = Some 60.;
+    solver_tolerance = Some 0.0;
     solver_allow_suboptimal = true;
     cudf_trim = None;
     dig_depth = 2;
@@ -102,7 +107,7 @@ let default =
     version_lag_power = 1;
   }
 
-let setk k t
+let[@ocaml.warning "-unerasable-optional-argument"] setk k t
     ?cudf_file
     ?solver
     ?best_effort
@@ -111,6 +116,7 @@ let setk k t
     ?solver_preferences_fixup
     ?solver_preferences_best_effort_prefix
     ?solver_timeout
+    ?solver_tolerance
     ?solver_allow_suboptimal
     ?cudf_trim
     ?dig_depth
@@ -133,6 +139,8 @@ let setk k t
       solver_preferences_best_effort_prefix;
     solver_timeout =
       t.solver_timeout + solver_timeout;
+    solver_tolerance =
+      t.solver_tolerance + solver_tolerance;
     solver_allow_suboptimal =
       t.solver_allow_suboptimal + solver_allow_suboptimal;
     cudf_trim = t.cudf_trim + cudf_trim;
@@ -193,6 +201,8 @@ let initk k =
     E.besteffortprefixcriteria () >>| fun c -> (lazy (Some c)) in
   let solver_timeout =
     E.solvertimeout () >>| fun f -> if f <= 0. then None else Some f in
+  let solver_tolerance =
+    E.solvertolerance () >>| fun f -> if f <= 0. then None else Some f in
   setk (setk (fun c -> r := with_auto_criteria c; k)) !r
     ~cudf_file:(E.cudffile ())
     ~solver
@@ -202,6 +212,7 @@ let initk k =
     ?solver_preferences_fixup:fixup_criteria
     ?solver_preferences_best_effort_prefix:best_effort_prefix_criteria
     ?solver_timeout
+    ?solver_tolerance
     ?solver_allow_suboptimal:(E.solverallowsuboptimal ())
     ~cudf_trim:(E.cudftrim ())
     ?dig_depth:(E.digdepth ())
@@ -211,7 +222,8 @@ let initk k =
 let init ?noop:_ = initk (fun () -> ())
 
 let best_effort =
-  let r = lazy (
+  let already_warned = ref false in
+  fun () ->
     !r.best_effort &&
     let crit = match Lazy.force !r.solver_preferences_default with
       | Some c -> c
@@ -220,14 +232,15 @@ let best_effort =
     let pfx = Lazy.force !r.solver_preferences_best_effort_prefix in
     pfx <> None ||
     OpamStd.String.contains ~sub:"opam-query" crit ||
-    (OpamConsole.warning
-       "Your solver configuration does not support --best-effort, the option \
-        was ignored (you need to specify variable OPAMBESTEFFORTCRITERIA, or \
-        set your criteria to maximise the count for cudf attribute \
-        'opam-query')";
+    (if not !already_warned then begin
+       already_warned := true;
+       OpamConsole.warning
+         "Your solver configuration does not support --best-effort, the option \
+          was ignored (you need to specify variable OPAMBESTEFFORTCRITERIA, or \
+          set your criteria to maximise the count for cudf attribute \
+          'opam-query')"
+     end;
      false)
-  ) in
-  fun () -> Lazy.force r
 
 let criteria kind =
   let crit = match kind with
@@ -250,4 +263,7 @@ let call_solver ~criteria cudf =
   let module S = (val Lazy.force (!r.solver)) in
   OpamConsole.log "SOLVER" "Calling solver %s with criteria %s"
     (OpamCudfSolver.get_name (module S)) criteria;
-  S.call ~criteria ?timeout:(!r.solver_timeout) cudf
+  let chrono = OpamConsole.timer () in
+  let r = S.call ~criteria ?timeout:(!r.solver_timeout) ?tolerance:(!r.solver_tolerance) cudf in
+  OpamConsole.log "SOLVER" "External solver took %.3fs" (chrono ());
+  r

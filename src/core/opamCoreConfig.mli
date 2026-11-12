@@ -13,7 +13,9 @@
 
 module E : sig
   type OpamStd.Config.E.t +=
+    | AUTOANSWER of (string * OpamStd.Config.answer) list option
     | COLOR of OpamStd.Config.when_ option
+    | CONFIRMLEVEL of OpamStd.Config.answer option
     | DEBUG of int option
     | DEBUGSECTIONS of OpamStd.Config.sections option
     | ERRLOGLEN of int option
@@ -24,17 +26,23 @@ module E : sig
     | PRECISETRACKING of bool option
     | SAFE of bool option
     | STATUSLINE of OpamStd.Config.when_ option
-    | USEOPENSSL of bool option
     | UTF8 of OpamStd.Config.when_ext option
     | UTF8MSGS of bool option
     | VERBOSE of OpamStd.Config.level option
     | YES of bool option
+
+    val confirmlevel: unit -> OpamStd.Config.answer option
     val debug: unit -> int option
     val logs: unit -> string option
     val yes: unit -> bool option
 end
 
 type t = private {
+  auto_answer : (string * OpamStd.Config.answer) list;
+  (** Controls the answer of specific interactive questions.
+      It maps names to its wanted answer and takes precedence
+      over [yes] and [confirm_level] for the questions linked
+      to the specific names listed. *)
   debug_level : int;
   (** Controls debug messages, 0 to disable *)
   debug_sections : OpamStd.Config.sections;
@@ -51,9 +59,10 @@ type t = private {
   disp_status_line: OpamStd.Config.when_;
   (** Controls on-line display of parallel commands being run, using ANSI
       escapes *)
-  answer : bool option;
-  (** Affects interactive questions in OpamConsole: auto-answer with the given
-      bool if Some *)
+  confirm_level : [ OpamStd.Config.answer | `undefined ];
+  yes: bool option;
+  (** Affects interactive questions in OpamConsole: used to compute the
+      automatic ansering level *)
   safe_mode : bool;
   (** Fail on writes or delays, don't ask questions (for quick queries, e.g.
       for shell completion) *)
@@ -65,31 +74,38 @@ type t = private {
   (** The number of log lines displayed on process error. 0 for all *)
   merged_output : bool;
   (** If set, stderr of commands is merged into their stdout *)
-  use_openssl : bool;
-  (** If false, will use built-in hash functions without checking for an openssl
-      executable first *)
   precise_tracking : bool;
   (** If set, will take full md5 of all files when checking diffs (to track
       installations), rather than rely on just file size and mtime *)
+  cygbin: string option;
+  (** Windows specific: the path of binary directory (bin/) of currently used
+      Cygwin install: internal or external Cygwin, or MSYS2. *)
+  git_location: string option;
+  (** Windows specific: the full path of the git binary to use on Windows. *)
   set : bool;
   (** Options have not yet been initialised (i.e. defaults are active) *)
+  in_opam : bool;
+  (** Indicates that the code is running inside of opam and not as a library *)
 }
 
 type 'a options_fun =
+  ?auto_answer:(string * OpamStd.Config.answer) list ->
   ?debug_level:int ->
   ?debug_sections:OpamStd.Config.sections ->
   ?verbose_level:OpamStd.Config.level ->
   ?color:OpamStd.Config.when_ ->
   ?utf8:OpamStd.Config.when_ext ->
   ?disp_status_line:OpamStd.Config.when_ ->
-  ?answer:bool option ->
+  ?confirm_level:OpamStd.Config.answer ->
+  ?yes:bool option ->
   ?safe_mode:bool ->
   ?log_dir:string ->
   ?keep_log_dir:bool ->
   ?errlog_length:int ->
   ?merged_output:bool ->
-  ?use_openssl:bool ->
   ?precise_tracking:bool ->
+  ?cygbin:string ->
+  ?git_location:string ->
   'a
 
 val default : t
@@ -110,5 +126,26 @@ val init: ?noop:_ -> (unit -> unit) options_fun
     stacking *)
 val initk: 'a -> 'a options_fun
 
+(** Automatic answering levels
+    * [`ask]: prompt and ask user
+    * [`all_no]: answer no to all opam questions
+    * [`all_yes]: answer yes to all opam questions
+    * [`unsafe_yes]: answer yes to all opam question and launch system package
+                     command wit non interactive options
+    If confirm-level is set (from cli or environment variable), its value is
+    returned. Otherwise, is takes last yes/no cli flag. For environment
+    variables, if [OPAMYES] is set to true, it has priority over [OPAMNO]. As
+    other environment variables, cli flags content is taken if given.
+    [answer_is] and [answer_is_yes] computes the answer lazily, use [answer] in
+    case of config update.
+*)
+val answer_is: name:string option -> OpamStd.Config.answer -> bool
+val answer_is_yes : name:string option -> unit -> bool
+val answer: name:string option -> unit -> OpamStd.Config.answer
+
 (** [true] if OPAM was compiled in developer mode *)
 val developer : bool
+
+(** Indicates that the code currently runs inside opam, not a library.
+    Internal use only. *)
+val set_in_opam : unit -> unit

@@ -10,25 +10,27 @@
 (**************************************************************************)
 
 open OpamTypes
-open OpamStd.Op
 open OpamProcess.Job.Op
 
 module type VCS = sig
   val name: OpamUrl.backend
   val exists: dirname -> bool
   val init: dirname -> url -> unit OpamProcess.job
-  val fetch: ?cache_dir:dirname -> ?subpath:string -> dirname -> url -> unit OpamProcess.job
+  val fetch:
+    ?full_fetch:bool -> ?cache_dir:dirname -> ?subpath:subpath -> dirname -> url ->
+    unit OpamProcess.job
   val reset_tree: dirname -> url -> unit OpamProcess.job
   val patch_applied: dirname -> url -> unit OpamProcess.job
   val diff: dirname -> url -> filename option OpamProcess.job
-  val is_up_to_date: dirname -> url -> bool OpamProcess.job
+  val is_up_to_date: ?subpath:subpath -> dirname -> url -> bool OpamProcess.job
   val revision: dirname -> string option OpamProcess.job
   val versioned_files: dirname -> string list OpamProcess.job
   val vc_dir: dirname -> dirname
   val current_branch: dirname -> string option OpamProcess.job
-  val is_dirty: ?subpath:string -> dirname -> bool OpamProcess.job
+  val is_dirty: ?subpath:subpath -> dirname -> bool OpamProcess.job
   val modified_files: dirname -> string list OpamProcess.job
   val get_remote_url: ?hash:string -> dirname -> url option OpamProcess.job
+  val clean: dirname -> unit OpamProcess.job
 end
 
 let convert_path =
@@ -39,40 +41,59 @@ module Make (VCS: VCS) = struct
   let name = VCS.name
 
   let fetch_repo_update repo_name ?cache_dir repo_root repo_url =
-    if VCS.exists repo_root then
-      OpamProcess.Job.catch (fun e -> Done (OpamRepositoryBackend.Update_err e))
-      @@ fun () ->
-      OpamRepositoryBackend.job_text repo_name "sync"
-        (VCS.fetch ?cache_dir repo_root repo_url)
-      @@+ fun () ->
-      OpamRepositoryBackend.job_text repo_name "diff"
-        (VCS.diff repo_root repo_url)
-      @@| function
-      | None -> OpamRepositoryBackend.Update_empty
-      | Some patch -> OpamRepositoryBackend.Update_patch patch
-    else
-      OpamProcess.Job.catch (fun e ->
-          OpamFilename.rmdir repo_root;
-          Done (OpamRepositoryBackend.Update_err e))
-      @@ fun () ->
-      OpamRepositoryBackend.job_text repo_name "init"
-        (VCS.init repo_root repo_url)
-      @@+ fun () ->
-      OpamRepositoryBackend.job_text repo_name "sync"
-        (VCS.fetch ?cache_dir repo_root repo_url)
-      @@+ fun () ->
-      let tmpdir = OpamFilename.Dir.(of_string (to_string repo_root ^".new")) in
-      OpamFilename.copy_dir ~src:repo_root ~dst:tmpdir;
-      OpamProcess.Job.catch (fun e -> OpamFilename.rmdir tmpdir; raise e)
-      @@ fun () ->
-      VCS.reset_tree tmpdir repo_url @@| fun () ->
-      OpamRepositoryBackend.Update_full tmpdir
+    match repo_root with
+    | OpamRepositoryRoot.Dir repo_root ->
+      let full_fetch = false in
+      let repo_root_dir = OpamRepositoryRoot.Dir.to_dir repo_root in
+      if VCS.exists repo_root_dir then
+        OpamProcess.Job.catch (fun e -> Done (OpamRepositoryBackend.Update_err e))
+        @@ fun () ->
+        OpamRepositoryBackend.job_text repo_name "sync"
+          (VCS.fetch ~full_fetch ?cache_dir repo_root_dir repo_url)
+        @@+ fun () ->
+        OpamRepositoryBackend.job_text repo_name "diff"
+          (VCS.diff repo_root_dir repo_url)
+        @@| function
+        | None -> OpamRepositoryBackend.Update_empty
+        | Some patch_file ->
+          try
+            let diffs =
+              OpamFilename.parse_patch ~dir:repo_root_dir patch_file
+            in
+            OpamRepositoryBackend.Update_patch (patch_file, diffs)
+          with exn -> Update_err exn
+      else
+        OpamProcess.Job.catch (fun e ->
+            OpamRepositoryRoot.Dir.remove repo_root;
+            Done (OpamRepositoryBackend.Update_err e))
+        @@ fun () ->
+        OpamRepositoryBackend.job_text repo_name "init"
+          (VCS.init repo_root_dir repo_url)
+        @@+ fun () ->
+        OpamRepositoryBackend.job_text repo_name "sync"
+          (VCS.fetch ~full_fetch ?cache_dir repo_root_dir repo_url)
+        @@+ fun () ->
+        let tmpdir = OpamRepositoryRoot.Dir.quarantine repo_root in
+        OpamRepositoryRoot.Dir.copy ~src:repo_root ~dst:tmpdir;
+        OpamProcess.Job.catch
+          (fun e -> OpamRepositoryRoot.Dir.remove tmpdir; raise e)
+        @@ fun () ->
+        VCS.reset_tree (OpamRepositoryRoot.Dir.to_dir tmpdir) repo_url
+        @@| fun () ->
+        OpamRepositoryBackend.Update_full (OpamRepositoryRoot.Dir tmpdir)
+    | OpamRepositoryRoot.Tgz _ ->
+      assert false (* VCS repository are always repositories *)
 
-  let repo_update_complete dirname url =
-    VCS.patch_applied dirname url @@+ fun () ->
-    Done ()
+  let repo_update_complete repo_root url =
+    match repo_root with
+    | OpamRepositoryRoot.Dir repo_root ->
+      VCS.patch_applied (OpamRepositoryRoot.Dir.to_dir repo_root) url
+      @@+ fun () ->
+      Done ()
+    | OpamRepositoryRoot.Tgz _ ->
+      assert false (* VCS repository are always repositories *)
 
-  let pull_url ?cache_dir ?subpath dirname checksum url =
+  let pull_url ?full_fetch ?cache_dir ?subpath dirname checksum url =
     if checksum <> None then invalid_arg "VC pull_url doesn't allow checksums";
     OpamProcess.Job.catch
       (fun e ->
@@ -83,8 +104,9 @@ module Make (VCS: VCS) = struct
          Done (Not_available (None, OpamUrl.to_string url)))
     @@ fun () ->
     if VCS.exists dirname then
-      VCS.fetch ?cache_dir ?subpath dirname url @@+ fun () ->
-      VCS.is_up_to_date dirname url @@+ function
+      VCS.clean dirname @@+ fun () ->
+      VCS.fetch ?full_fetch ?cache_dir ?subpath dirname url @@+ fun () ->
+      VCS.is_up_to_date ?subpath dirname url @@+ function
       | true -> Done (Up_to_date None)
       | false ->
         VCS.reset_tree dirname url @@+ fun () ->
@@ -92,22 +114,22 @@ module Make (VCS: VCS) = struct
     else
       (OpamFilename.mkdir dirname;
        VCS.init dirname url @@+ fun () ->
-       VCS.fetch ?cache_dir ?subpath dirname url @@+ fun () ->
+       VCS.fetch ?full_fetch ?cache_dir ?subpath dirname url @@+ fun () ->
        VCS.reset_tree dirname url @@+ fun () ->
        Done (Result None))
 
   let revision repo_root =
-    VCS.revision repo_root @@+ fun r ->
-    Done (OpamStd.Option.map OpamPackage.Version.of_string r)
+    VCS.revision repo_root
 
   let sync_dirty ?subpath repo_root repo_url =
     let filter_subpath files =
       match subpath with
       | None -> files
       | Some sp ->
-        OpamStd.List.filter_map
+        List.filter_map
           (fun f ->
-             if OpamStd.String.remove_prefix ~prefix:(sp ^ Filename.dir_sep) f
+             if OpamStd.String.remove_prefix
+                 ~prefix:(OpamFilename.SubPath.to_string sp ^ Filename.dir_sep) f
                 <> f then Some f else None)
           files
     in
@@ -145,7 +167,7 @@ module Make (VCS: VCS) = struct
         in
         OpamStd.String.Set.filter (fun f ->
             List.exists (fun prefix ->
-                OpamStd.String.starts_with ~prefix f)
+                OpamCompat.String.starts_with ~prefix f)
               exc)
           fset
       in
@@ -172,8 +194,8 @@ module Make (VCS: VCS) = struct
       OpamLocal.rsync_dirs ~args repo_url repo_root @@+ fun result ->
       OpamSystem.remove stdout_file;
       Done (match result with
-          | Up_to_date _ when rm_list = [] -> Up_to_date None
-          | Up_to_date _ | Result _ -> Result None
+          | Up_to_date () when rm_list = [] -> Up_to_date None
+          | Up_to_date () | Result () -> Result None
           | Not_available _ as na -> na)
 
   let get_remote_url = VCS.get_remote_url

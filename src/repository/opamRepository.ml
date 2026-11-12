@@ -44,10 +44,15 @@ let cache_file cache_dir checksum =
   in
   aux cache_dir (OpamHash.to_path checksum)
 
+let link_files ~target f l =
+  List.iter (fun x ->
+      OpamFilename.link ~relative:true ~target ~link:(f x))
+    l
+
 let fetch_from_cache =
   let currently_downloading = ref [] in
   let rec no_concurrent_dls key f x =
-    if List.mem key !currently_downloading then
+    if OpamStd.List.mem OpamHash.equal key !currently_downloading then
       Run (OpamProcess.command "sleep" ["1"],
            (fun _ -> no_concurrent_dls key f x))
     else
@@ -86,29 +91,34 @@ let fetch_from_cache =
           OpamProcess.Job.Op.Done ()
         | None ->
           (OpamLocal.rsync_file url file @@| function
-            | Result _ | Up_to_date _-> ()
+            | Result () | Up_to_date () -> ()
             | Not_available (s,l) -> raise (OpamDownload.Download_fail (s,l)))
       end
     | #OpamUrl.version_control ->
       failwith "Version control not allowed as cache URL"
   in
   try
-    let hit_checksum, hit_file =
-      OpamStd.List.find_map (fun ck ->
+    match
+      List.fold_left (fun (hit, misses) ck ->
           let f = cache_file cache_dir ck in
-          if OpamFilename.exists f then Some (ck, f) else None)
-        checksums
-    in
-    if List.for_all
-        (fun ck -> ck = hit_checksum ||
-                   OpamHash.check_file (OpamFilename.to_string hit_file) ck)
-        checksums
-    then Done (Up_to_date (hit_file, OpamUrl.empty))
-    else mismatch hit_file
+          if OpamFilename.exists f
+          then (if hit = None then (Some f, misses) else (hit, misses))
+          else (hit, f :: misses))
+        (None, []) checksums
+    with
+    | None, _ -> raise Not_found
+    | Some hit_file, miss_files ->
+      if List.for_all
+          (fun ck -> OpamHash.check_file (OpamFilename.to_string hit_file) ck)
+          checksums
+      then begin
+        link_files ~target:hit_file Fun.id miss_files;
+        Done (Up_to_date (hit_file, OpamUrl.empty))
+      end else
+        mismatch hit_file
   with Not_found -> match checksums with
     | [] -> let m = "cache miss" in Done (Not_available (Some m, m))
-    | checksum::_ ->
-      (* Try all cache urls in order, but only the first checksum *)
+    | checksum::other_checksums ->
       let local_file = cache_file cache_dir checksum in
       let tmpfile = OpamFilename.add_extension local_file "tmp" in
       let rec try_cache_dl = function
@@ -126,6 +136,7 @@ let fetch_from_cache =
               checksums
           then
             (OpamFilename.move ~src:tmpfile ~dst:local_file;
+             link_files ~target:local_file (cache_file cache_dir) other_checksums;
              Done (Result (local_file, root_cache_url)))
           else mismatch tmpfile
       in
@@ -149,16 +160,19 @@ let validate_and_add_to_cache label url cache_dir file checksums =
     OpamFilename.remove file;
     false
   with Not_found ->
-    (match cache_dir, checksums with
-     | Some dir, ck::_ ->
-       OpamFilename.copy ~src:file ~dst:(cache_file dir ck)
-       (* idea: hardlink to the other checksums? *)
+    (let checksums = OpamHash.sort checksums in
+     match cache_dir, checksums with
+     | Some dir, best_chks :: others_chks ->
+       let target = cache_file dir best_chks in
+       OpamFilename.copy ~src:file ~dst:target;
+       link_files ~target (cache_file dir) others_chks;
      | _ -> ());
     true
 
 (* [cache_dir] used to add to cache only *)
 let pull_from_upstream
-    label ?(working_dir=false) ?subpath cache_dir destdir checksums url =
+    label ?full_fetch ?(working_dir=false) ?subpath
+    cache_dir destdir checksums url =
   let module B = (val url_backend url: OpamRepositoryBackend.S) in
   let cksum = match checksums with [] -> None | c::_ -> Some c in
   let text =
@@ -200,7 +214,7 @@ let pull_from_upstream
        )
      else url, B.pull_url
    in
-   pull ?cache_dir ?subpath destdir cksum url
+   pull ?full_fetch ?cache_dir ?subpath destdir cksum url
   )
   @@| function
   | (Result (Some file) | Up_to_date (Some file)) as ret ->
@@ -213,14 +227,17 @@ let pull_from_upstream
   | (Result None | Up_to_date None) as ret -> ret
   | Not_available _ as na -> na
 
-let pull_from_mirrors label ?working_dir ?subpath cache_dir destdir checksums urls =
+let pull_from_mirrors label ?full_fetch ?working_dir ?subpath
+    cache_dir destdir checksums urls =
   let rec aux = function
     | [] -> invalid_arg "pull_from_mirrors: empty mirror list"
     | [url] ->
-      pull_from_upstream label ?working_dir ?subpath cache_dir destdir checksums url
+      pull_from_upstream label ?full_fetch ?working_dir ?subpath
+        cache_dir destdir checksums url
       @@| fun r -> url, r
     | url::mirrors ->
-      pull_from_upstream label ?working_dir ?subpath cache_dir destdir checksums url
+      pull_from_upstream label ?full_fetch ?working_dir ?subpath
+        cache_dir destdir checksums url
       @@+ function
       | Not_available (_,s) ->
         OpamConsole.warning "%s: download of %s failed (%s), trying mirror"
@@ -238,20 +255,79 @@ let pull_from_mirrors label ?working_dir ?subpath cache_dir destdir checksums ur
     url, Not_available (Some m, m)
   | ret -> ret
 
-let pull_tree
-    label ?cache_dir ?(cache_urls=[]) ?working_dir ?subpath
-    local_dirname checksums remote_urls =
-  let extract_archive f s =
-    OpamFilename.cleandir local_dirname;
-    OpamFilename.extract_job f local_dirname @@+ function
-    | None -> Done (Up_to_date s)
-    | Some (Failure s) ->
-      Done (Not_available (Some s, "Could not extract archive:\n"^s))
-    | Some (OpamSystem.Process_error pe) ->
-      Done (Not_available (Some (OpamProcess.result_summary pe),
-                           OpamProcess.string_of_result pe))
-    | Some e -> Done (Not_available (None, Printexc.to_string e))
+(* handle subpathes *)
+let pull_tree_t
+    ?full_fetch ?cache_dir ?(cache_urls=[]) ?working_dir
+    dirnames checksums remote_urls =
+  let extract_archive =
+    let fallback success = function
+      | None -> success ()
+      | Some (Failure s) ->
+        Done (Not_available (Some s, "Could not extract archive:\n"^s))
+      | Some (OpamSystem.Process_error pe) ->
+        Done (Not_available (Some (OpamProcess.result_summary pe),
+                             OpamProcess.string_of_result pe))
+      | Some e -> Done (Not_available (None, Printexc.to_string e))
+    in
+    match dirnames with
+    | [ label, local_dirname, _subpath ] ->
+      (fun archive msg ->
+         OpamFilename.cleandir local_dirname;
+         let text = OpamProcess.make_command_text label "extract" in
+         OpamProcess.Job.with_text text @@
+         OpamFilename.extract_job archive local_dirname
+         @@+ fallback (fun () ->  Done (Up_to_date msg)))
+    | _ ->
+      fun archive msg ->
+        OpamFilename.with_tmp_dir_job @@ fun tmpdir ->
+        let copies () =
+          OpamParallel.map ~jobs:3
+            ~command:(fun (label, local_dirname, _subpath) ->
+                let text = OpamProcess.make_command_text label label in
+                OpamProcess.Job.with_text text @@
+                (try
+                   OpamFilename.cleandir local_dirname;
+                   OpamFilename.copy_dir ~src:tmpdir ~dst:local_dirname;
+                   Done (Up_to_date label)
+                 with OpamSystem.Process_error r ->
+                   Done (Not_available
+                           (Some label, OpamProcess.result_summary r))))
+            dirnames
+        in
+        let text =
+          let label =
+            match dirnames with
+            | [(label1, _, _); (label2, _, _)] ->
+              label1 ^ ", " ^ label2
+            | (label, _, _)::rest ->
+              Printf.sprintf "%s + %d others" label (List.length rest)
+            | [] -> assert false in
+          OpamProcess.make_command_text label "extract"
+        in
+        OpamProcess.Job.with_text text @@
+        OpamFilename.extract_job archive tmpdir
+        @@+ fallback (fun () ->
+            let failing =
+              List.filter_map (function
+                  | Result _ | Up_to_date _ -> None
+                  | Not_available (Some s,l) -> Some (s,l)
+                  | Not_available (None, _) -> assert false
+                ) (copies ())
+            in
+            if failing = [] then Done (Up_to_date msg) else
+            let simple =
+              Printf.sprintf "Failed to copy source of %s"
+                (OpamStd.Format.pretty_list (List.map fst failing))
+            in
+            let long =
+              Printf.sprintf "Failed to copy source of:\n%s"
+                (OpamStd.Format.itemize (fun (nv, msg) ->
+                     Printf.sprintf "%s: %s" nv msg)
+                    failing)
+            in
+            Done (Not_available (Some simple, long)))
   in
+  let label = OpamStd.List.concat_map ", " (fun (x,_,_) -> x) dirnames in
   (match cache_dir with
    | Some cache_dir ->
      let text = OpamProcess.make_command_text label "dl" in
@@ -278,17 +354,52 @@ let pull_tree
           Some ("missing checksum"),
           label ^ ": Missing checksum, and `--require-checksums` was set."))
     else
-      pull_from_mirrors label ?working_dir ?subpath cache_dir local_dirname checksums
-        remote_urls
+      OpamFilename.with_tmp_dir_job @@ fun tmpdir ->
+      (* We need to check if the url can be an archive or not, to know if it
+         need to be downloaded directly in the source directory [local_dirname]
+         or in temporary one [tmpdir] to extract it in sources directory *)
+      let pull =
+        let label0, destdir, subpath =
+          match dirnames with
+          | [ label, local_dirname, subpath ] ->
+            let need_local_dirname =
+              List.for_all OpamUrl.(fun u ->
+                  match u.backend with
+                  | #version_control -> true
+                  | `http -> OpamFilename.exists_dir (OpamRepositoryPath.pin_cache u)
+                  | `rsync -> local_dir u <> None)
+                remote_urls
+            in
+            Some label,
+            (if need_local_dirname then local_dirname else tmpdir),
+            subpath
+          | _ -> None, tmpdir, None
+        in
+        fun label checksums remote_urls ->
+          pull_from_mirrors (OpamStd.Option.default label label0)
+            ?full_fetch ?working_dir ?subpath cache_dir destdir
+            checksums remote_urls
+          @@| fun (url, res) ->
+          (OpamUrl.to_string_w_subpath subpath url),
+          res
+      in
+      pull label checksums remote_urls
       @@+ function
       | _, Up_to_date None -> Done (Up_to_date "no changes")
       | url, (Up_to_date (Some archive) | Result (Some archive)) ->
-        OpamFilename.with_tmp_dir_job @@ fun tmpdir ->
-        let tmp_archive = OpamFilename.(create tmpdir (basename archive)) in
-        OpamFilename.move ~src:archive ~dst:tmp_archive;
-        extract_archive tmp_archive (OpamUrl.to_string url)
-      | url, Result None -> Done (Result (OpamUrl.to_string url))
+        extract_archive archive url
+      | url, Result None -> Done (Result url)
       | _, (Not_available _ as na) -> Done na
+
+
+let pull_tree label
+    ?full_fetch ?cache_dir ?(cache_urls=[]) ?working_dir ?subpath
+    local_dirname  =
+  pull_tree_t ?full_fetch ?cache_dir ~cache_urls ?working_dir
+    [label, local_dirname, subpath]
+
+let pull_shared_tree ?cache_dir ?(cache_urls=[]) dirnames checksums remote_urls =
+  pull_tree_t ?cache_dir ~cache_urls dirnames checksums remote_urls
 
 let revision dirname url =
   let kind = url.OpamUrl.backend in
@@ -353,10 +464,12 @@ let pull_file_to_cache label ~cache_dir ?(cache_urls=[]) checksums remote_urls =
         | _, (Not_available _ as na) -> na)
 
 let packages repo_root =
-  OpamPackage.list (OpamRepositoryPath.packages_dir repo_root)
+  OpamRepositoryRoot.Dir.Path.packages_dir repo_root
+  |> OpamPackage.list
 
 let packages_with_prefixes repo_root =
-  OpamPackage.prefixes (OpamRepositoryPath.packages_dir repo_root)
+  OpamRepositoryRoot.Dir.Path.packages_dir repo_root
+  |> OpamPackage.prefixes
 
 let validate_repo_update repo repo_root update =
   match
@@ -378,11 +491,11 @@ let validate_repo_update repo repo_root update =
       let env v = match OpamVariable.Full.to_string v, update with
         | "anchors", _ -> Some (S (String.concat "," ta.fingerprints))
         | "quorum", _ -> Some (S (string_of_int ta.quorum))
-        | "repo", _ -> Some (S (OpamFilename.Dir.to_string repo_root))
-        | "patch", Update_patch f -> Some (S (OpamFilename.to_string f))
+        | "repo", _ -> Some (S (OpamRepositoryRoot.to_string repo_root))
+        | "patch", Update_patch (f, _)  -> Some (S (OpamFilename.to_string f))
         | "incremental", Update_patch _ -> Some (B true)
         | "incremental", _ -> Some (B false)
-        | "dir", Update_full d -> Some (S (OpamFilename.Dir.to_string d))
+        | "dir", Update_full d -> Some (S (OpamRepositoryRoot.to_string d))
         | _ -> None
       in
       match OpamFilter.single_command env hook with
@@ -403,18 +516,18 @@ let apply_repo_update repo repo_root = function
   | Update_full d ->
     log "%a: applying update from scratch at %a"
       (slog OpamRepositoryName.to_string) repo.repo_name
-      (slog OpamFilename.Dir.to_string) d;
-    OpamFilename.rmdir repo_root;
-    if OpamFilename.is_symlink_dir d then
-      (OpamFilename.copy_dir ~src:d ~dst:repo_root;
-       OpamFilename.rmdir d)
+      (slog OpamRepositoryRoot.to_string) d;
+    OpamRepositoryRoot.remove repo_root;
+    if OpamRepositoryRoot.is_symlink d then
+      (OpamRepositoryRoot.copy ~src:d ~dst:repo_root;
+       OpamRepositoryRoot.remove d)
     else
-      OpamFilename.move_dir ~src:d ~dst:repo_root;
+      OpamRepositoryRoot.move ~src:d ~dst:repo_root;
     OpamConsole.msg "[%s] Initialised\n"
       (OpamConsole.colorise `green
          (OpamRepositoryName.to_string repo.repo_name));
-    Done ()
-  | Update_patch f ->
+    Done []
+  | Update_patch (f, diffs)  ->
     OpamConsole.msg "[%s] synchronised from %s\n"
       (OpamConsole.colorise `green
          (OpamRepositoryName.to_string repo.repo_name))
@@ -422,16 +535,14 @@ let apply_repo_update repo repo_root = function
     log "%a: applying patch update at %a"
       (slog OpamRepositoryName.to_string) repo.repo_name
       (slog OpamFilename.to_string) f;
-    let preprocess =
-      match repo.repo_url.OpamUrl.backend with
-      | `http | `rsync -> false
-      | _ -> true
+    let patch_result =
+      OpamRepositoryRoot.patch ~allow_unclean:false (`Patch_diffs diffs)
+        repo_root
     in
-    (OpamFilename.patch ~preprocess f repo_root @@+ function
-      | Some e ->
-        if not (OpamConsole.debug ()) then OpamFilename.remove f;
-        raise e
-      | None -> OpamFilename.remove f; Done ())
+    if not (OpamConsole.debug ()) then OpamFilename.remove f;
+    (match patch_result with
+     | Ok diffs -> Done diffs
+     | Error e -> raise e)
   | Update_empty ->
     OpamConsole.msg "[%s] no changes from %s\n"
       (OpamConsole.colorise `green
@@ -439,14 +550,14 @@ let apply_repo_update repo repo_root = function
       (OpamUrl.to_string repo.repo_url);
     log "%a: applying empty update"
       (slog OpamRepositoryName.to_string) repo.repo_name;
-    Done ()
+    Done []
   | Update_err _ -> assert false
 
 let cleanup_repo_update upd =
   if not (OpamConsole.debug ()) then
     match upd with
-    | Update_full d -> OpamFilename.rmdir d
-    | Update_patch f -> OpamFilename.remove f
+    | Update_full d -> OpamRepositoryRoot.remove d
+    | Update_patch (f, _) -> OpamFilename.remove f
     | _ -> ()
 
 let update repo repo_root =
@@ -456,8 +567,10 @@ let update repo repo_root =
   | Update_err e -> raise e
   | Update_empty ->
     log "update empty, no validation performed";
-    apply_repo_update repo repo_root Update_empty @@+ fun () ->
-    B.repo_update_complete repo_root repo.repo_url
+    apply_repo_update repo repo_root Update_empty @@+ fun diffs ->
+    assert (diffs = []);
+    B.repo_update_complete repo_root repo.repo_url @@+ fun () ->
+    Done `No_changes
   | (Update_full _ | Update_patch _) as upd ->
     OpamProcess.Job.catch (fun exn ->
         cleanup_repo_update upd;
@@ -468,8 +581,9 @@ let update repo repo_root =
       cleanup_repo_update upd;
       failwith "Invalid repository signatures, update aborted"
     | true ->
-      apply_repo_update repo repo_root upd @@+ fun () ->
-      B.repo_update_complete repo_root repo.repo_url
+      apply_repo_update repo repo_root upd @@+ fun diffs ->
+      B.repo_update_complete repo_root repo.repo_url @@+ fun () ->
+      Done (`Changes diffs)
 
 let on_local_version_control url ~default f =
   match url.OpamUrl.backend with

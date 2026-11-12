@@ -23,8 +23,8 @@ open OpamStateTypes
 val env:
   'a global_state -> switch ->
   ?set_opamroot:bool -> ?set_opamswitch:bool ->
-  csh:bool -> sexp:bool -> fish:bool -> inplace_path:bool ->
-  unit
+  csh:bool -> sexp:bool -> fish:bool -> pwsh:bool -> cmd:bool ->
+  inplace_path:bool -> unit
 
 (** Ensures that the environment file exists in the given switch, regenerating
     it, if necessary. *)
@@ -32,13 +32,13 @@ val ensure_env: 'a global_state -> switch -> unit
 
 (** Like [env] but allows one to specify the precise env to print rather than
     compute it from a switch state *)
-val print_eval_env: csh:bool -> sexp:bool -> fish:bool -> env -> unit
+val print_eval_env: csh:bool -> sexp:bool -> fish:bool -> pwsh:bool -> cmd:bool -> env -> unit
 
 (** Display the content of all available packages variables *)
 val list: 'a switch_state -> name list -> unit
 
 (** Substitute files *)
-val subst: 'a global_state -> basename list -> unit
+val subst: 'a global_state -> filename list -> unit
 
 (** Prints expansion of variables in string *)
 val expand: 'a global_state -> string -> unit
@@ -46,7 +46,8 @@ val expand: 'a global_state -> string -> unit
 (** Execute a command in a subshell, after variable expansion *)
 val exec:
   [< unlocked ] global_state ->
-  ?set_opamroot:bool -> ?set_opamswitch:bool -> inplace_path:bool ->
+  set_opamroot:bool -> set_opamswitch:bool -> inplace_path:bool ->
+  no_switch:bool ->
   string list -> unit
 
 (** {2 Variables and options display and setting } *)
@@ -69,7 +70,7 @@ type update_op = [ append_op  | whole_op ]
     Raise [Invalid_argument] if the string is malformed *)
 val parse_update: string -> string * update_op
 
-(** As [parse_update] but parse only overwrites and reverts. String is of the
+(** As {!parse_update} but parse only overwrites and reverts. String is of the
     form [var=[value]]`.
     Raise [Invalid_argument] if the string is malformed *)
 val parse_whole: string -> string * whole_op
@@ -78,28 +79,32 @@ val whole_of_update_op: update_op -> whole_op
 
 (** [set_opt_global gt field value] updates global config field with update
     value in <opamroot>/config file. Modifiable fields are a subset of all
-    defined fields in [OpamFile.Config.t]. On revert, field is reverted to its
-    initial value as defined in [OpamInitDefaults.init_config], to default
-    value otherwise ([OpamFile.Config.empty]).
-    May raise [OpamStd.Sys.Exit 2]. *)
+    defined fields in {!OpamFile.Config.t}. On revert, field is reverted to its
+    initial value as defined in {!OpamInitDefaults.init_config}, to default
+    value otherwise ({!OpamFile.Config.empty}).
+    @raise OpamStd.Sys.Exit ([`Bad_argument], [2]) if the field is not found or not
+    modifiable, or the value have a parse error. *)
 val set_opt_global: rw global_state -> string -> update_op -> rw global_state
 
-(** As [set_opt_global], [set_opt_switch] updates switch config file in
+(** As {!set_opt_global}, {!set_opt_switch} updates switch config file in
     <opamroot>/<switch>/.opam-switch/switch-config. If switch state is given,
     uses its config and returns it with then new config. Otherwise, loads the
-    raw switch state and returns [None]. *)
+    raw switch state and returns [None].
+    @raise OpamStd.Sys.Exit ([`Configuration_error], [50]) if no switch is set *)
 val set_opt_switch:
   'a global_state -> ?st:rw switch_state -> string -> update_op
   -> rw switch_state option
 
-(** [set_var_global] and [set_var_switch] update respectively `global-variables`
+(** {!set_var_global} and {!set_var_switch} update respectively `global-variables`
     field in global config and `variables` field in switch config, by appending
     the new variables to current set. If switch state is given, uses its
     config and returns it with then new config. Otherwise, loads the raw switch
     state and returns [None].
-    May raise [OpamStd.Sys.Exit 2]. *)
+    @raise OpamStd.Sys.Exit ([`Bad_argument], [2]) if field is not modifiable *)
 val set_var_global:
   rw global_state -> string -> whole_op -> rw global_state
+
+(** @raise OpamStd.Sys.Exit ([`Configuration_error], [50]) if no switch is set *)
 val set_var_switch:
     'a global_state -> ?st:rw switch_state -> string -> whole_op
     -> rw switch_state option
@@ -113,6 +118,8 @@ val set_var_switch:
 val options_list:
   ?st:unlocked switch_state -> 'a global_state -> unit
 val options_list_global: 'a global_state -> unit
+
+(** @raise OpamStd.Sys.Exit ([`Configuration_error], [50]) if no switch is set *)
 val options_list_switch:
   ?st:unlocked switch_state -> 'a global_state -> unit
 
@@ -122,6 +129,8 @@ val options_list_switch:
 val vars_list:
   ?st:'a switch_state -> 'b global_state -> unit
 val vars_list_global: 'a global_state -> unit
+
+(** @raise OpamStd.Sys.Exit ([`Configuration_error], [50]) if no switch is set *)
 val vars_list_switch:
   ?st:'a switch_state -> 'b global_state -> unit
 
@@ -133,6 +142,8 @@ val vars_list_switch:
     state. *)
 
 val option_show_global: 'a global_state -> string -> unit
+
+(** @raise OpamStd.Sys.Exit ([`Configuration_error], [50]) if no switch is set *)
 val option_show_switch:
   'a global_state -> ?st:unlocked switch_state -> string -> unit
 

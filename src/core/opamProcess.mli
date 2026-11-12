@@ -12,7 +12,18 @@
 (** Process and job handling, with logs, termination status, etc. *)
 
 (** The type of shell commands *)
-type command
+type command = private {
+  cmd: string;
+  args: string list;
+  cmd_text: string option;
+  cmd_dir: string option;
+  cmd_env: string array option;
+  cmd_stdin: bool option;
+  cmd_stdout: string option;
+  cmd_verbose: bool option;
+  cmd_name: string option;
+  cmd_metadata: (string * string) list option;
+}
 
 (** Builds a shell command for later execution.
     @param env         environment for the command
@@ -87,12 +98,12 @@ type result = {
     Don't forget to call [cleanup result] afterwards *)
 val run : command -> result
 
-(** Same as [run], but doesn't wait. Use wait_one to wait and collect
+(** Same as {!run}, but doesn't wait. Use wait_one to wait and collect
     results;
     Don't forget to call [cleanup result] afterwards *)
 val run_background: command -> t
 
-(** Similar to [run_background], except that no process is created, and a dummy
+(** Similar to {!run_background}, except that no process is created, and a dummy
     process (suitable for dry_wait_one) is returned. *)
 val dry_run_background: command -> t
 
@@ -100,15 +111,15 @@ val dry_run_background: command -> t
     careful to handle Sys.Break *)
 val wait: t -> result
 
-(** Like [wait], but returns None immediately if the process hasn't ended *)
+(** Like {!wait}, but returns None immediately if the process hasn't ended *)
 val dontwait: t -> result option
 
 (** Wait for the first of the listed processes to terminate, and return its
     termination status *)
 val wait_one: t list -> t * result
 
-(** Similar to [wait_one] for simulations, to be used with
-    [dry_run_background] *)
+(** Similar to {!wait_one} for simulations, to be used with
+    {!dry_run_background} *)
 val dry_wait_one: t list -> t * result
 
 (** Send SIGINT to a process (or SIGKILL on Windows) *)
@@ -194,12 +205,12 @@ module Job: sig
   val of_list: ?keep_going:bool -> command list ->
     (command * result) option Op.job
 
-  (** As [of_list], but takes a list of functions that return the commands. The
+  (** As {!of_list}, but takes a list of functions that return the commands. The
       functions will only be evaluated when the command needs to be run. *)
   val of_fun_list: ?keep_going:bool -> (unit -> command) list ->
     (command * result) option Op.job
 
-  (** Returns the job made of the the given homogeneous jobs run sequentially *)
+  (** Returns the job made of the given homogeneous jobs run sequentially *)
   val seq: ('a -> 'a Op.job) list -> 'a -> 'a Op.job
 
   (** Sequentially maps jobs on a list *)
@@ -211,9 +222,14 @@ end
 
 type 'a job = 'a Job.Op.job
 
-(**/**)
-val set_resolve_command :
-  (?env:string array -> ?dir:string -> string -> string option) -> unit
+
+(** Current environment. On Windows, Cygwin installation binary path and git
+    location path may be added to PATH. **)
+val default_env : unit -> string array
+
+(** As {!OpamStd.Sys.resolve_command}, except the default for [~env] is
+    {!default_env}. *)
+val resolve_command: ?env:string array -> ?dir:string -> string -> string option
 
 (** Like Unix.create_process_env, but with correct escaping of arguments when
     invoking a cygwin executable from a native Windows executable. *)

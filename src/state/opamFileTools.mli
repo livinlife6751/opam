@@ -26,7 +26,7 @@ val lint:
   ?check_upstream:bool ->
   OpamFile.OPAM.t -> (int * [`Warning|`Error] * string) list
 
-(** Same as [lint], but operates on a file, which allows catching parse errors
+(** Same as {!lint}, but operates on a file, which allows catching parse errors
    too. [check_extra_files] defaults to a function that will look for a [files/]
    directory besides [filename]. [handle_dirname] is used for warning 4, and
    should be set when reading packages from a repository, so that package name
@@ -38,7 +38,19 @@ val lint_file:
   OpamFile.OPAM.t OpamFile.typed_file ->
   (int * [`Warning|`Error] * string) list * OpamFile.OPAM.t option
 
-(** Same as [lint_file], but taking input from a channel. [check_extra_files]
+(** Same as {!lint}, but operates on an registered repository opam file.
+    It allows to retrieve extra files accordingly to the repository nature :
+    archive or directory.
+*)
+val lint_repo_package:
+  OpamRepositoryRoot.t ->
+  ?check_extra_files:(basename * (OpamHash.t -> bool)) list ->
+  ?check_upstream:bool ->
+  ?handle_dirname:bool ->
+  OpamFile.OPAM.t OpamFile.typed_file ->
+  (int * [`Warning|`Error] * string) list * OpamFile.OPAM.t option
+
+(** Same as {!lint_file}, but taking input from a channel. [check_extra_files]
    defaults to a function that will look for a [files/] directory besides
    [filename] *)
 val lint_channel:
@@ -48,7 +60,7 @@ val lint_channel:
   OpamFile.OPAM.t OpamFile.typed_file -> in_channel ->
   (int * [`Warning|`Error] * string) list * OpamFile.OPAM.t option
 
-(** Like [lint_file], but takes the file contents as a string.
+(** Like {!lint_file}, but takes the file contents as a string.
    [check_extra_files] defaults to a function that will look for a [files/]
    directory besides [filename] *)
 val lint_string:
@@ -65,6 +77,7 @@ val warns_to_string: (int * [`Warning|`Error] * string) list -> string
 
 (** Utility function to construct a json of validation results.
     The format is as follow:
+    {[
     { "file"     : string <filename>,
       "result"   : string (passed | error | warning),
       "warnings" :
@@ -78,31 +91,46 @@ val warns_to_string: (int * [`Warning|`Error] * string) list -> string
           ...
         ]
     }
+    ]}
 *)
 val warns_to_json:
   ?filename:string -> (int * [`Warning|`Error] * string) list -> OpamJson.t
 
 (** Read the opam metadata from a given directory (opam file, with possible
-    overrides from url and descr files). Also includes the names and hashes
-    of files below files/
-    Warning: use [read_repo_opam] instead for correctly reading files from
+    overrides from url and descr files).
+    Warning: use {!read_repo_opam} instead for correctly reading files from
     repositories!*)
 val read_opam: dirname -> OpamFile.OPAM.t option
 
-(** Like [read_opam], but additionally fills in the [metadata_dir] info
+(** Like {!read_opam}, but additionally fills in the [metadata_dir] info
     correctly for the given repository. *)
 val read_repo_opam:
-  repo_name:repository_name -> repo_root:dirname ->
+  repo_name:repository_name -> root:dirname ->
   dirname -> OpamFile.OPAM.t option
+
+(** Like {!read_opam}, but additionally fills in the [metadata_dir] info
+    correctly for the given directory repository root. *)
+val read_repo_opam_dir:
+  repo_name:repository_name -> repo_root:OpamRepositoryRoot.Dir.t ->
+  dirname -> OpamFile.OPAM.t option
+
+(** Like {!read_opam}, but additionally fills in the [metadata_dir] info
+    correctly for the given repository. *)
+val read_repo_opam_tgz:
+  repo_name:repository_name -> repo_root:OpamRepositoryRoot.Tgz.t ->
+  OpamFilename.Unix.Dir.t -> OpamFilename.Unix.t
+  -> OpamTar.archived_file_content
+  -> OpamTar.archived_file_content OpamFilename.Unix.Map.t
+  -> OpamFile.OPAM.t option
 
 (** Adds data from 'url' and 'descr' files found in the specified dir or the
     opam file's metadata dir, if not already present in the opam file. if
     [files_subdir_hashes] is [true], also adds the names and hashes of files
     found below 'files/' *)
 val add_aux_files:
-  ?dir:dirname -> files_subdir_hashes:bool -> OpamFile.OPAM.t -> OpamFile.OPAM.t
+  ?dir:dirname -> ?files_subdir_hashes:bool -> OpamFile.OPAM.t -> OpamFile.OPAM.t
 
-(** {2 Tools to manipulate the [OpamFile.OPAM.t] contents} *)
+(** {2 Tools to manipulate the {!OpamFile.OPAM.t} contents} *)
 val map_all_variables:
   (full_variable -> full_variable) -> OpamFile.OPAM.t -> OpamFile.OPAM.t
 
@@ -116,3 +144,9 @@ val dep_formula_to_string: formula -> string
 (** Sort opam fields: author, tags, depexts, depends, depopts, conflicts,
     pin_depends, extra_files, extra_sources *)
 val sort_opam: OpamFile.OPAM.t -> OpamFile.OPAM.t
+
+(** Returns depexts from all the opam files associated to packages, after
+    filter evaluations *)
+val opams_depexts :
+  env:OpamFilter.env -> OpamFile.OPAM.t OpamPackage.Map.t ->
+  OpamSysPkg.Set.t

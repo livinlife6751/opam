@@ -9,7 +9,13 @@
 (*                                                                        *)
 (**************************************************************************)
 
-(** Git repository backend (based on OpamVCS) *)
+(** Git repository backend (based on {!OpamVCS}) *)
+
+(** Returns [OpamProcess.default_env] + some git specific environment variables
+    used to make git calls more reproducible.
+    Note however that it cannot be used if you need values from the global git
+    configs (e.g. /etc/gitconfig or ~/.gitconfig) *)
+val env : unit -> string array
 
 module VCS: OpamVCS.VCS
 

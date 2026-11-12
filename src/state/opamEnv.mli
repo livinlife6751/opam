@@ -16,13 +16,18 @@ open OpamStateTypes
 
 (** {2 Environment handling} *)
 
+(* Resolve [env_update] separator & format according system *)
+val resolve_separator_and_format:
+  ('r, 'a) env_update -> (spf_resolved, 'a) env_update
+
 (** Get the current environment with OPAM specific additions. If [force_path],
     the PATH is modified to ensure opam dirs are leading. [set_opamroot] and
     [set_opamswitch] can be additionally used to set the [OPAMROOT] and
-    [OPAMSWITCH] variables. *)
+    [OPAMSWITCH] variables. [scrub] is a list of environment variables to
+    remove from the environment. *)
 val get_full:
-  ?set_opamroot:bool -> ?set_opamswitch:bool -> force_path:bool ->
-  ?updates:env_update list -> 'a switch_state -> env
+  set_opamroot:bool -> set_opamswitch:bool -> force_path:bool ->
+  ?updates: ('r, euok_internal) env_update list -> ?scrub:string list -> 'a switch_state -> env
 
 (** Get only environment modified by OPAM. If [force_path], the PATH is modified
     to ensure opam dirs are leading. [set_opamroot] and [set_opamswitch] can be
@@ -30,32 +35,48 @@ val get_full:
 
     With [base], apply the modifications to the specified base environment *)
 val get_opam:
-  ?set_opamroot:bool -> ?set_opamswitch:bool -> force_path:bool ->
+  set_opamroot:bool -> set_opamswitch:bool -> force_path:bool ->
   'a switch_state -> env
 
-(** Like [get_opam], but reads the cache file from the given opam root and
+(** Like {!get_opam}, but reads the cache file from the given opam root and
     switch instead of computing the environment from a switch state.
 
     With [base], apply the modifications to the specified base environment *)
 val get_opam_raw:
-  ?set_opamroot:bool -> ?set_opamswitch:bool -> ?base:env ->
+  set_opamroot:bool -> set_opamswitch:bool -> ?base:env ->
   force_path:bool ->
   dirname -> switch -> env
 
+(** Like {!get_opam_raw}, but returns the list of updates instead of the new
+    environment. *)
+val get_opam_raw_updates:
+  set_opamroot:bool -> set_opamswitch:bool -> force_path:bool ->
+  dirname -> switch -> (spf_resolved, [> euok_writeable ]) env_update list
+
+(** Returns a hash of the given env_update list suitable for use with
+    OPAM_LAST_ENV *)
+val hash_env_updates: ('a, euok_writeable) env_update list -> string
+
 (** Returns the running environment, with any opam modifications cleaned out,
     and optionally the given updates *)
-val get_pure: ?updates:env_update list -> unit -> env
+val get_pure: ?updates:(spf_resolved, euok_internal) env_update list -> unit -> env
+
+(** The list of executables from Cygwin which must not be allowed to be shadowed
+    by other directories of PATH. This list must not contain git.exe - it is
+    added only if Cygwin's git is installed. The list is used to determine the
+    furthest point in PATH that Cygwin's bin directory can be placed. *)
+val cygwin_non_shadowed_programs : string list
 
 (** Update an environment, including reverting opam changes that could have been
     previously applied (therefore, don't apply to an already updated env as
-    returned by e.g. [get_full]!) *)
-val add: env -> env_update list -> env
+    returned by e.g. {!get_full}!) *)
+val add: env -> (spf_resolved, euok_internal) env_update list -> env
 
-(** Like [get_opam] computes environment modification by OPAM , but returns
+(** Like {!get_opam} computes environment modification by OPAM , but returns
     these [updates] instead of the new environment. *)
 val updates:
-  ?set_opamroot:bool -> ?set_opamswitch:bool -> ?force_path:bool ->
-  'a switch_state -> env_update list
+  set_opamroot:bool -> set_opamswitch:bool -> ?force_path:bool ->
+  'a switch_state -> (spf_resolved, [> euok_writeable ]) env_update list
 
 (** Check if the shell environment is in sync with the current OPAM switch,
     unless [skip] is true (it's default value is OPAMNOENVNOTICE *)
@@ -68,7 +89,7 @@ val is_up_to_date_switch: dirname -> switch -> bool
 
 (** Returns the current environment updates to configure the current switch with
     its set of installed packages *)
-val compute_updates: ?force_path:bool -> 'a switch_state -> env_update list
+val compute_updates: ?force_path:bool -> 'a switch_state -> (spf_resolved, [> euok_writeable ]) env_update list
 
 (** Returns shell-appropriate statement to evaluate [cmd]. *)
 val shell_eval_invocation:
@@ -77,7 +98,7 @@ val shell_eval_invocation:
 (** Returns "opam env" invocation string together with optional root and switch
     overrides *)
 val opam_env_invocation:
-  ?root:string -> ?switch:string -> ?set_opamswitch:bool -> unit -> string
+  ?root:string -> ?switch:string -> ?set_opamswitch:bool -> OpamTypes.shell -> string
 
 (** The shell command to run by the user to set his OPAM environment, adapted to
     the current shell (as returned by [eval `opam config env`]) *)
@@ -91,7 +112,10 @@ val path: force_path:bool -> dirname -> switch -> string
 (** Returns the full environment with only the PATH variable updated, as per
     [path] *)
 val full_with_path:
-  force_path:bool -> ?updates:env_update list -> dirname -> switch -> env
+  force_path:bool -> ?updates:(spf_resolved, euok_internal) env_update list -> dirname -> switch -> env
+
+(** Performs variable expansion on the strings in an environment update *)
+val env_expansion: ?opam:OpamFile.OPAM.t -> 'a switch_state -> (spf_unresolved, 'b) env_update -> (spf_unresolved, 'b) env_update
 
 (** {2 Shell and initialisation support} *)
 
@@ -116,8 +140,8 @@ val update_user_setup:
 val write_static_init_scripts:
   dirname -> ?completion:bool -> ?env_hook:bool -> ?inplace:bool -> unit -> unit
 
-(** Write into [OpamPath.hooks_dir] the given custom scripts (listed as
-    (filename, content)), normally provided by opamrc ([OpamFile.InitConfig]) *)
+(** Write into {!OpamPath.hooks_dir} the given custom scripts (listed as
+    (filename, content)), normally provided by opamrc ({!OpamFile.InitConfig}) *)
 val write_custom_init_scripts:
   dirname -> (string * string) list -> unit
 
@@ -139,3 +163,8 @@ val check_and_print_env_warning: 'a switch_state -> unit
 (** Hook directory environment *)
 val hook_env:
   OpamPath.t -> OpamVariable.variable_contents option OpamVariable.Map.t
+
+(** {2 Misc} *)
+
+(** System OCaml eval variables for configuration. *)
+val sys_ocaml_eval_variables : (OpamVariable.t * string list * string) list

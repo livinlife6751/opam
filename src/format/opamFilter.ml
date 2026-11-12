@@ -11,7 +11,6 @@
 
 open OpamTypes
 open OpamTypesBase
-open OpamStd.Op
 
 module OpamParser = OpamParser.FullPos
 module OpamPrinter = OpamPrinter.FullPos
@@ -24,48 +23,64 @@ type env = full_variable -> variable_contents option
 
 type fident = name option list * variable * (string * string) option
 
-let to_string t =
+let to_string ?custom t =
+  let custom ~context ~paren t =
+    match custom with
+    | None -> None
+    | Some f -> f ~context ~paren t
+  in
   let rec aux ?(context=`Or) t =
     let paren ?(cond=false) f =
       if cond || OpamFormatConfig.(!r.all_parens)
       then Printf.sprintf "(%s)" f else f
     in
-    match t with
-    | FBool b    -> string_of_bool b
-    | FString s  -> Printf.sprintf "%S" s
-    | FIdent (pkgs,var,converter) ->
-      OpamStd.List.concat_map "+"
-        (function None -> "_" | Some p -> OpamPackage.Name.to_string p) pkgs ^
-      (if pkgs <> [] then ":" else "") ^
-      OpamVariable.to_string var ^
-      (match converter with
-       | Some (it,ifu) -> "?"^it^":"^ifu
-       | None -> "")
-    | FOp(e,s,f) ->
-      paren ~cond:(context <> `Or && context <> `And)
-        (Printf.sprintf "%s %s %s"
-           (aux ~context:`Relop e) (OpamPrinter.relop_kind s) (aux ~context:`Relop f))
-    | FAnd (e,f) ->
-      paren ~cond:(context <> `Or && context <> `And)
-        (Printf.sprintf "%s & %s" (aux ~context:`And e) (aux ~context:`And f))
-    | FOr (e,f)  ->
-      paren ~cond:(context <> `Or)
-        (Printf.sprintf "%s | %s" (aux e) (aux f))
-    | FNot e     ->
-      paren ~cond:(context = `Relop)
-        (Printf.sprintf "!%s" (aux ~context:`Not e))
-    | FDefined e ->
-      paren ~cond:(context = `Relop)
-        (Printf.sprintf "?%s" (aux ~context:`Defined e))
-    | FUndef f -> Printf.sprintf "#undefined(%s)" (aux f)
+    match custom ~context ~paren t with
+    | Some str -> str
+    | None ->
+      match t with
+      | FBool b    -> string_of_bool b
+      | FString s  -> Printf.sprintf "%S" s
+      | FIdent (pkgs,var,converter) ->
+        OpamStd.List.concat_map "+"
+          (function None -> "_" | Some p -> OpamPackage.Name.to_string p) pkgs
+        ^ (if pkgs <> [] then ":" else "")
+        ^ OpamVariable.to_string var
+        ^ (match converter with
+            | Some (it,ifu) -> "?"^it^":"^ifu
+            | None -> "")
+      | FOp(e,s,f) ->
+        paren ~cond:(context <> `Or && context <> `And)
+          (Printf.sprintf "%s %s %s"
+             (aux ~context:`Relop e)
+             (OpamPrinter.relop_kind s)
+             (aux ~context:`Relop f))
+      | FAnd (e,f) ->
+        paren ~cond:(context <> `Or && context <> `And)
+          (Printf.sprintf "%s & %s" (aux ~context:`And e) (aux ~context:`And f))
+      | FOr (e,f)  ->
+        paren ~cond:(context <> `Or)
+          (Printf.sprintf "%s | %s" (aux e) (aux f))
+      | FNot e     ->
+        paren ~cond:(context = `Relop)
+          (Printf.sprintf "!%s" (aux ~context:`Not e))
+      | FDefined e ->
+        paren ~cond:(context = `Relop)
+          (Printf.sprintf "?%s" (aux ~context:`Defined e))
+      | FUndef f -> Printf.sprintf "#undefined(%s)" (aux f)
   in
   aux t
 
 let rec fold_down_left f acc filter = match filter with
   | FOp(l,_,r) | FAnd(l,r) | FOr(l,r) ->
     fold_down_left f (fold_down_left f (f acc filter) l) r
-  | FNot(x) -> fold_down_left f (f acc filter) x
-  | x -> f acc x
+  | FNot x
+  | FUndef x
+  | FDefined x ->
+    fold_down_left f (f acc filter) x
+  | FBool _
+  | FString _
+  | FIdent _ ->
+    f acc filter
 
 let rec map_up f = function
   | FOp (l, op, r) -> f (FOp (map_up f l, op, map_up f r))
@@ -73,7 +88,8 @@ let rec map_up f = function
   | FOr (l, r) -> f (FOr (map_up f l, map_up f r))
   | FNot x -> f (FNot (map_up f x))
   | FUndef x -> f (FUndef (map_up f x))
-  | (FBool _ | FString _ | FIdent _ | FDefined _) as flt -> f flt
+  | FDefined x -> f (FDefined (map_up f x))
+  | (FBool _ | FString _ | FIdent _) as flt -> f flt
 
 (* ["%%"], ["%{xxx}%"], or ["%{xxx"] if unclosed *)
 let string_interp_regex =
@@ -107,9 +123,7 @@ let fident_variables = function
         | Some n -> OpamVariable.Full.create n var
         | None -> OpamVariable.Full.self var) pkgs
 
-(* extracts variables appearing in interpolations in a string*)
-let string_variables s =
-  let matches =
+let extract_variables_from_string s =
     let rec aux acc pos =
       try
         let ss = Re.exec ~pos string_interp_regex s in
@@ -121,11 +135,13 @@ let string_variables s =
       with Not_found -> acc
     in
     aux [] 0
-  in
+
+(* extracts variables appearing in interpolations in a string *)
+let string_variables s =
   List.fold_left (fun acc s ->
-      try fident_variables (filter_ident_of_string s) @ acc
+      try fident_variables (filter_ident_of_string_interp s) @ acc
       with Failure _ -> acc)
-    [] matches
+    [] (extract_variables_from_string s)
 
 let variables filter =
   fold_down_left (fun acc -> function
@@ -203,13 +219,15 @@ let resolve_ident_raw ?(no_undef_expand=false) env fident =
       (Some true) names
     >>| fun b -> B b
   in
-  match converter, no_undef_expand with
-  | Some (iftrue, iffalse), false ->
+  match converter with
+  | Some (iftrue, iffalse) ->
     (match value_opt >>= bool_of_value with
      | Some true -> Some (S iftrue)
      | Some false -> Some (S iffalse)
-     | None -> Some (S iffalse))
-  | _ -> value_opt
+     | None ->
+         if no_undef_expand then value_opt else Some (S iffalse)
+    )
+  | None -> value_opt
 
 (* Resolves [FIdent] to string or bool, using its package and converter
    specification *)
@@ -238,12 +256,13 @@ let expand_string_aux ?(partial=false) ?(escape_value=fun x -> x) ?default env t
   let f g =
     let str = Re.Group.get g 0 in
     if str = "%%" then (if partial then "%%" else "%")
-    else if not (OpamStd.String.ends_with ~suffix:"}%" str) then
+    else if not (OpamCompat.String.ends_with ~suffix:"}%" str) then
       (log "ERR: Unclosed variable replacement in %S\n" str;
        str)
     else
     let fident = String.sub str 2 (String.length str - 4) in
-    resolve_ident ~no_undef_expand:partial env (filter_ident_of_string fident)
+    resolve_ident ~no_undef_expand:partial env
+      (filter_ident_of_string_interp fident)
     |> value_string ?default:(default fident) |> escape_value
   in
   Re.replace string_interp_regex ~f text
@@ -261,7 +280,7 @@ let unclosed_expansions text =
         ])
     )
   in
-  Re.all re text |> OpamStd.List.filter_map @@ fun gr ->
+  Re.all re text |> List.filter_map @@ fun gr ->
   if Re.Group.test gr 1 && not (Re.Group.test gr 2) then
     Some (Re.Group.offset gr 0, Re.Group.get gr 0)
   else None
@@ -295,7 +314,7 @@ let map_variables_in_string f =
     ~default:(fun fid_string ->
         try
           fid_string |>
-          filter_ident_of_string |>
+          filter_ident_of_string_interp |>
           map_variables_in_fident f |>
           string_of_filter_ident
         with Failure _ -> fid_string)
@@ -405,12 +424,10 @@ let ident_string ?default env id = value_string ?default (resolve_ident env id)
 
 let ident_bool ?default env id = value_bool ?default (resolve_ident env id)
 
-(* Substitute the file contents *)
-let expand_interpolations_in_file env file =
-  let f = OpamFilename.of_basename file in
-  let src = OpamFilename.add_extension f "in" in
+(* Substitute the file contents and specify the source and destination *)
+let expand_interpolations_in_file_full env ~src ~dst =
   let ic = OpamFilename.open_in_bin src in
-  let oc = OpamFilename.open_out_bin f in
+  let oc = OpamFilename.open_out_bin dst in
   (* Determine if the input file parses in opam-file-format *)
   let is_opam_format =
     try
@@ -443,6 +460,11 @@ let expand_interpolations_in_file env file =
   close_in ic;
   close_out oc
 
+(* Substitute the file contents *)
+let expand_interpolations_in_file env dst =
+  let src = OpamFilename.add_extension dst OpamPathName.subst_ext in
+  expand_interpolations_in_file_full env ~src ~dst
+
 (* Apply filters and interpolations to package commands *)
 
 let arguments env (a,f) =
@@ -467,7 +489,7 @@ let command env (l, f) =
   else
     None
 
-let commands env l = OpamStd.List.filter_map (command env) l
+let commands env l = List.filter_map (command env) l
 
 let single_command env l = List.concat (List.map (arguments env) l)
 
@@ -576,7 +598,7 @@ let variables_of_filtered_formula ff =
          acc f)
     [] ff
 
-let deps_var_env ~build ~post ?test ?doc ?dev var =
+let deps_var_env ~build ~post ?test ?doc ?dev_setup ?dev var =
   let get_opt = function
     | Some b -> Some (B b)
     | None -> invalid_arg "filter_deps"
@@ -586,11 +608,15 @@ let deps_var_env ~build ~post ?test ?doc ?dev var =
   | "post" -> Some (B post)
   | "with-test" -> get_opt test
   | "with-doc" -> get_opt doc
+  | "with-dev-setup" -> get_opt dev_setup
   | "dev" -> get_opt dev
   | _ -> None
 
-let filter_deps ~build ~post ?test ?doc ?dev ?default_version ?default deps =
-  filter_formula ?default_version ?default (deps_var_env ~build ~post ?test ?doc ?dev) deps
+let filter_deps
+    ~build ~post ?test ?doc ?dev_setup ?dev ?default_version ?default
+    deps =
+  filter_formula ?default_version ?default
+    (deps_var_env ~build ~post ?test ?doc ?dev_setup ?dev) deps
 
 let rec simplify_extended_version_formula ef =
   let to_pure ef =
@@ -608,7 +634,7 @@ let rec simplify_extended_version_formula ef =
   in
   match to_pure ef with
   | Some f ->
-    OpamStd.Option.map to_filtered (OpamFormula.simplify_version_formula f)
+    Option.map to_filtered (OpamFormula.simplify_version_formula f)
   | None -> match ef with
     | And _ | Or _ ->
       let conj = match ef with And _ -> true | _ -> false in

@@ -32,6 +32,9 @@ val stats: solution -> stats
 (** Return the new packages in the solution *)
 val new_packages: solution -> package_set
 
+(** Return removed new packages in the solution *)
+val removed_packages: solution -> package_set
+
 (** Return all packages appearing in the solution *)
 val all_packages: solution -> package_set
 
@@ -41,22 +44,24 @@ val string_of_stats: stats -> string
 (** Is the solution empty? *)
 val solution_is_empty: solution -> bool
 
-(** Display a solution *)
+(** Display a solution. [skip] skips printing the actions on the given packages
+    and replaces their names in other places where they appear *)
 val print_solution:
   messages:(package -> string list) ->
   append:(package -> string) ->
-  requested:name_set -> reinstall:package_set ->
-  solution -> unit
+  requested:name_set -> reinstall:package_set -> available:package_set ->
+  ?skip:package OpamPackage.Map.t ->
+  user_action -> solution -> unit
 
 (** Serialize a solution *)
 val solution_to_json : solution OpamJson.encoder
 val solution_of_json : solution OpamJson.decoder
 
-(** Computes an opam->cudf version map from a set of package *)
-val cudf_versions_map: universe -> package_set -> int OpamPackage.Map.t
+(** Computes an opam->cudf version map from an universe *)
+val cudf_versions_map: universe -> int OpamPackage.Map.t
 
 (** Creates a CUDF universe from an OPAM universe, including the given packages.
-    Evaluation of the first 4 arguments is staged. Warning: when [depopts] is
+    Evaluation of the first 3 arguments is staged. Warning: when [depopts] is
     [true], the optional dependencies may become strong dependencies.
 
     Use [add_invariant] if you expect to call the solver and need the switch
@@ -64,24 +69,28 @@ val cudf_versions_map: universe -> package_set -> int OpamPackage.Map.t
     [Cudf.remove_package universe OpamCudf.opam_invariant_package]
     before exporting the results *)
 val load_cudf_universe:
-  universe -> ?version_map:int package_map -> ?add_invariant:bool ->
+  universe -> ?version_map:int package_map ->
   package_set ->
-  ?depopts:bool -> build:bool -> post:bool -> unit ->
+  ?add_invariant:bool -> ?depopts:bool -> build:bool -> post:bool -> unit ->
   Cudf.universe
 
-(**  Build a request *)
+(** Build a request. [all] defaults to all atoms concerned by any action, and is
+    used for limiting the solution to the relevant packages, an empty list
+    implying all actions are relevant (no trimming) *)
 val request:
   ?criteria:solver_criteria ->
   ?install:atom list ->
   ?upgrade:atom list ->
   ?remove:atom list ->
+  ?deprequest:atom OpamFormula.formula ->
+  ?all:atom list ->
   unit -> atom request
 
 (** Given a description of packages, return a solution preserving the
     consistency of the initial description. *)
 val resolve :
-  universe -> orphans:package_set -> atom request
-  -> (solution, OpamCudf.conflict) result
+  universe -> atom request
+  -> (solution, OpamCudf.conflict) solver_result
 
 (** Returns the graph of atomic actions (rm, inst) from a solution *)
 val get_atomic_action_graph : solution -> ActionGraph.t
@@ -89,27 +98,8 @@ val get_atomic_action_graph : solution -> ActionGraph.t
 (** Keep only the packages that are installable. *)
 val installable: universe -> package_set
 
-(** Like [installable], but within a subset and potentially much faster *)
+(** Like {!installable}, but within a subset and potentially much faster *)
 val installable_subset: universe -> package_set -> package_set
-
-(** Return the transitive dependency closures
-    of a collection of packages.*)
-val dependencies :
-  depopts:bool -> build:bool -> post:bool ->
-  installed:bool ->
-  ?unavailable:bool ->
-  universe ->
-  package_set ->
-  package_set
-
-(** Same as [dependencies] but for reverse dependencies *)
-val reverse_dependencies :
-  depopts:bool -> build:bool -> post:bool ->
-  installed:bool ->
-  ?unavailable:bool ->
-  universe ->
-  package_set ->
-  package_set
 
 (** Sorts the given package set in topological order (as much as possible,
     beware of cycles in particular if [post] is [true]) *)
@@ -124,7 +114,7 @@ module PkgGraph: Graph.Sig.I
 val dependency_graph :
   depopts:bool -> build:bool -> post:bool ->
   installed:bool ->
-  ?unavailable:bool ->
+  unavailable:bool ->
   universe -> PkgGraph.t
 
 (** Check the current set of installed packages in a universe for
@@ -141,14 +131,16 @@ val atom_coinstallability_check : universe -> atom list -> bool
 
 (** [coinstallable_subset univ set packages] returns the subset of [packages]
     which are individually co-installable with [set], i.e. that can be installed
-    if [set] while [set] remains installed. This returns the empty set if [set]
-    is already not coinstallable. *)
-val coinstallable_subset : universe -> package_set -> package_set -> package_set
+    while [set] remains installed. This returns the empty set if [set]
+    is already not coinstallable. `add_invariant` defaults to [true] *)
+val coinstallable_subset :
+  universe -> ?add_invariant:bool -> package_set -> package_set -> package_set
 
 (** Dumps a cudf file containing all available packages in the given universe,
     plus version bindings (as '#v2v' comments) for the other ones. *)
 val dump_universe: universe -> out_channel -> unit
 
 (** Filters actions in a solution. Dependents of a removed actions are removed
-    to keep consistency *)
-val filter_solution: (package -> bool) -> solution -> solution
+    to keep consistency unless [recursive] is set to false *)
+val filter_solution:
+  ?recursive:bool -> (package -> bool) -> solution -> solution

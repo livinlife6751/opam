@@ -15,6 +15,7 @@ open OpamStd.Op
 
 type bad_format = pos option * string
 
+exception Bad_version of bad_format * OpamVersion.t option
 exception Bad_format of bad_format
 exception Bad_format_list of bad_format list
 
@@ -24,20 +25,35 @@ let bad_format ?pos fmt =
        raise (Bad_format (pos,str)))
     fmt
 
+let bad_version v ?pos fmt =
+  Printf.ksprintf
+    (fun str ->
+       raise (Bad_version ((pos,str), v)))
+    fmt
+
 let add_pos pos = function
   | Bad_format (pos_opt,msg) as e ->
     if pos_opt = None || pos_opt = Some pos_null
     then Bad_format (Some pos, msg)
     else e
+  | Bad_version ((pos_opt,msg),v) as e ->
+    if pos_opt = None || pos_opt = Some pos_null
+    then Bad_version ((Some pos, msg),v)
+    else e
+
   | e -> e
 
 let rec string_of_bad_format ?file e =
   match e, file with
+  | Bad_version ((None, msg), _), Some filename
   | Bad_format (None, msg), Some filename
+  | Bad_version ((Some {filename; start = -1, -1 ; stop = -1,-1 }, msg), _), _
   | Bad_format (Some {filename; start = -1, -1 ; stop = -1,-1 }, msg), _ ->
     Printf.sprintf "In %s:\n%s" filename msg
+  | Bad_version ((Some pos, msg), _), _
   | Bad_format (Some pos, msg), _ ->
     Printf.sprintf "At %s:\n%s" (string_of_pos pos) msg
+  | Bad_version ((None, msg), _), None
   | Bad_format (None, msg), None ->
     Printf.sprintf "Input error:\n%s" msg
   | Bad_format_list bfl, _ ->
@@ -46,7 +62,7 @@ let rec string_of_bad_format ?file e =
   | _ -> Printexc.to_string e
 
 let () = Printexc.register_printer @@ function
-  | (Bad_format _ | Bad_format_list _ as e) ->
+  | (Bad_version _ | Bad_format _ | Bad_format_list _ as e) ->
     Some (string_of_bad_format ?file:None e)
   | _ -> None
 
@@ -73,7 +89,8 @@ let unexpected ?pos () = raise (Unexpected pos)
 (** Basic pp usage *)
 
 let parse pp ~pos x = try pp.parse ~pos x with
-  | Bad_format _ | Bad_format_list _ as e -> raise (add_pos pos e)
+  | Bad_version _ | Bad_format _ | Bad_format_list _ as e ->
+    raise (add_pos pos e)
   | Unexpected (Some pos) -> bad_format ~pos "expected %s" pp.ppname
   | Unexpected None -> bad_format ~pos "expected %s" pp.ppname
   | Failure msg ->
@@ -120,13 +137,13 @@ let ignore = {
   name_constr = (fun _ -> "<ignored>");
 }
 
-let check ?name ?errmsg f =
+let check ?name ?(raise=fun _ ?pos fmt -> bad_format ?pos fmt) ?errmsg f =
   pp
     ?name
     (fun ~pos x ->
        if not (f x) then
          match errmsg with
-         | Some m -> bad_format ~pos "%s" m
+         | Some m -> raise x ~pos "%s" m
          | None -> unexpected ()
        else x)
     (fun x ->
@@ -178,8 +195,8 @@ let map_option ?name pp1 =
     | Some n -> n
   in
   pp ~name
-    (fun ~pos -> OpamStd.Option.map (parse pp1 ~pos))
-    (OpamStd.Option.map (print pp1))
+    (fun ~pos -> Option.map (parse pp1 ~pos))
+    (Option.map (print pp1))
 
 let singleton = {
   parse = (fun ~pos:_ -> function [x] -> x | _ -> unexpected ());
@@ -225,6 +242,7 @@ let default d =
     (fun x -> Some x)
 
 let fallback pp1 pp2 =
+  let ppname = pp1.ppname^" | "^pp2.ppname in
   let parse ~pos x =
     try pp1.parse ~pos x with e ->
       OpamStd.Exn.fatal e;
@@ -232,7 +250,14 @@ let fallback pp1 pp2 =
       try pp2.parse ~pos x with _ ->
         Printexc.raise_with_backtrace e bt
   in
-  { pp1 with parse }
+  let print x =
+    try pp1.print x with e ->
+      OpamStd.Exn.fatal e;
+      let bt = Printexc.get_raw_backtrace () in
+      try pp2.print x with _ ->
+        Printexc.raise_with_backtrace e bt
+  in
+  { pp1 with ppname; parse; print }
 
 
 module Op = struct
@@ -255,7 +280,7 @@ let ppacc_opt
         set (cleanup ~pos acc (pp1.parse ~pos s)) acc
       | acc, None -> acc
     in
-    let print s = s, OpamStd.Option.map pp1.print (get s) in
+    let print s = s, Option.map pp1.print (get s) in
     {
       parse; print;
       ppname = pp1.ppname;

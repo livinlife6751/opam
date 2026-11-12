@@ -15,25 +15,44 @@
 open OpamTypes
 
 (** Get the list of packages *)
-val packages: dirname -> package_set
+val packages: OpamRepositoryRoot.Dir.t -> package_set
 
 (** Get the list of packages (and their possible prefix) *)
-val packages_with_prefixes: dirname -> string option package_map
+val packages_with_prefixes: OpamRepositoryRoot.Dir.t -> string option package_map
 
 (** {2 Repository backends} *)
 
-(** Update {i $opam/repo/$repo}. Raises [Failure] in case the update couldn't be
-    achieved. *)
-val update: repository -> dirname -> unit OpamProcess.job
+(** Update {i $opam/repo/$repo}. Returns [`No_changes] if the update did not
+    bring any changes, and [`Changes of Patch.operation list]
+    representing creations, deletions, and modifications of regular files.
 
-(** Fetch an URL and put the resulting tree into the supplied directory. The URL
-    must either point to a tree (VCS, rsync) or to a known archive type. In case
-    of an archive, the cache is used and supplied the hashes verified, then the
-    archive uncompressed. In case of a version-controlled URL, it's checked out,
-    or synchronised directly if local and [working_dir] was set. *)
+    @raise Failure in case the update couldn't be achieved. *)
+val update:
+  repository -> OpamRepositoryRoot.t ->
+  [`Changes of Patch.operation list |`No_changes] OpamProcess.job
+
+(** [pull_shared_tree ?cache_dir ?cache_url labels_dirnames checksums urls]
+    Fetch an URL and put the resulting tree into the supplied directories
+    specified in [labels_dirnames]. The string in [labels_dirnames] are text
+    labels of this given dirname for display. [urls] must either point to a
+    tree (VCS, rsync) or to a known archive type. In case of an archive, the
+    [cache_dir] is used and supplied the hashes verified, then the archive
+    uncompressed. In case of a version-controlled URL, it's checked out, or
+    synchronised directly if local and [working_dir] was set.  [cache_urls] is
+    used to retrieve from repository caches. *)
+val pull_shared_tree:
+  ?cache_dir:dirname ->
+  ?cache_urls:OpamUrl.t list ->
+  (string * OpamFilename.Dir.t * subpath option) list -> OpamHash.t list ->
+  url list -> string download OpamProcess.job
+
+(* Same as {!pull_shared_tree}, but for a unique label/dirname.
+   If [full_fetch] is set to false, VCS repository is retrieved with shallow
+   history (by default, full history). *)
 val pull_tree:
-  string -> ?cache_dir:dirname -> ?cache_urls:url list -> ?working_dir:bool ->
-  ?subpath:string -> dirname -> OpamHash.t list -> url list ->
+  string -> ?full_fetch:bool -> ?cache_dir:dirname -> ?cache_urls:url list ->
+  ?working_dir:bool -> ?subpath:subpath ->
+  dirname -> OpamHash.t list -> url list ->
   string download OpamProcess.job
 
 (** Same as [pull_tree], but for fetching a single file. *)
@@ -43,7 +62,8 @@ val pull_file:
   unit download OpamProcess.job
 
 (** Same as [pull_file], but without a destination file: just ensures the file
-    is present in the cache. *)
+    is present in the cache and that every listed checksums are correctly linked
+    to the archive, otherwise it adds the missing links. *)
 val pull_file_to_cache:
   string -> cache_dir:dirname -> ?cache_urls:url list ->
   OpamHash.t list -> url list -> string download OpamProcess.job
@@ -53,7 +73,7 @@ val pull_file_to_cache:
 val cache_file: dirname -> OpamHash.t -> filename
 
 (** Get the optional revision associated to a backend (git hash, etc.). *)
-val revision: dirname -> url -> version option OpamProcess.job
+val revision: dirname -> url -> string option OpamProcess.job
 
 (** Get the version-control branch for that url. Only applicable for local,
     version controlled URLs. Returns [None] in other cases. *)
@@ -61,7 +81,7 @@ val current_branch: url -> string option OpamProcess.job
 
 (** Returns true if the url points to a local, version-controlled directory that
     has uncommitted changes *)
-val is_dirty: ?subpath:string -> url -> bool OpamProcess.job
+val is_dirty: ?subpath:subpath -> url -> bool OpamProcess.job
 
 (** Find a backend *)
 val find_backend: repository -> (module OpamRepositoryBackend.S)

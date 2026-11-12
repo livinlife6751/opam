@@ -17,7 +17,7 @@ let log fmt = OpamConsole.log "SWACT" fmt
 let slog = OpamConsole.slog
 
 let gen_switch_config
-    root ?(synopsis="") ?repos ?(invariant=OpamFormula.Empty) _switch =
+    root ?(synopsis="") ?repos ?invariant _switch =
   let vars =
     List.map (fun (s,p) -> OpamVariable.of_string s, S p) [
       ("user" ,
@@ -29,7 +29,7 @@ let gen_switch_config
     ]
   in
   { OpamFile.Switch_config.
-    opam_version = OpamFile.Switch_config.format_version;
+    opam_version = OpamFile.Switch_config.file_format_version;
     synopsis;
     variables = vars;
     paths = [];
@@ -73,9 +73,7 @@ let create_empty_switch gt ?synopsis ?repos ?invariant switch =
     OpamFilename.mkdir (OpamPath.Switch.man_dir root switch config);
     OpamFilename.mkdir (OpamPath.Switch.install_dir root switch);
     OpamFilename.mkdir (OpamPath.Switch.config_dir root switch);
-    List.iter (fun num ->
-        OpamFilename.mkdir (OpamPath.Switch.man_dir ~num root switch config)
-      ) ["1";"1M";"2";"3";"4";"5";"6";"7";"9"];
+    List.iter OpamFilename.mkdir (OpamPath.Switch.man_dirs root switch config);
 
     install_switch_config root switch config;
 
@@ -148,17 +146,23 @@ let install_metadata st nv =
   OpamFile.OPAM.write
     (OpamPath.Switch.installed_opam st.switch_global.root st.switch nv)
     opam;
-  List.iter (fun (f, rel_path, _hash) ->
-      let dst =
-        OpamFilename.create
-          (OpamPath.Switch.installed_opam_files_dir
-             st.switch_global.root st.switch nv)
-          rel_path
-      in
-      OpamFilename.mkdir (OpamFilename.dirname dst);
-      OpamFilename.copy ~src:f ~dst)
+  List.iter (fun (rel_path, content, _hash) ->
+      match content with
+      | None ->
+        log "%s: error installing extra files, empty content for %s"
+          (OpamPackage.to_string nv)
+          (OpamFilename.Base.to_string rel_path)
+      | Some content ->
+        let dst =
+          OpamFilename.create
+            (OpamPath.Switch.installed_opam_files_dir
+               st.switch_global.root st.switch nv)
+            rel_path
+        in
+        OpamFilename.mkdir (OpamFilename.dirname dst);
+        OpamFilename.write dst (Lazy.force content))
     (OpamFile.OPAM.get_extra_files
-       ~repos_roots:(OpamRepositoryState.get_root st.switch_repos)
+       ~get_repo_files:(OpamRepositoryState.get_repo_files st.switch_repos)
        opam)
 
 let remove_metadata st packages =
@@ -176,9 +180,6 @@ let update_switch_state ?installed ?installed_roots ?reinstall ?pinned st =
   let installed = installed +! st.installed in
   let reinstall0 = Lazy.force st.reinstall in
   let reinstall = (reinstall +! reinstall0) %% installed in
-  let compiler_packages =
-    OpamPackage.Set.filter (OpamFormula.verifies st.switch_invariant) installed
-  in
   let old_selections = OpamSwitchState.selections st in
   let st =
     { st with
@@ -186,10 +187,17 @@ let update_switch_state ?installed ?installed_roots ?reinstall ?pinned st =
       installed_roots = installed_roots +! st.installed_roots;
       reinstall = lazy reinstall;
       pinned = pinned +! st.pinned;
-      compiler_packages; }
+       }
   in
+  let compiler_packages =
+    OpamSwitchState.compute_invariant_packages st
+  in
+  let st = { st with compiler_packages } in
   if not OpamStateConfig.(!r.dryrun) then (
-    if OpamSwitchState.selections st <> old_selections then write_selections st;
+    if not (OpamTypesBase.switch_selections_equal
+              (OpamSwitchState.selections st)
+              old_selections) then
+      write_selections st;
     if not (OpamPackage.Set.equal reinstall0 reinstall) then
       OpamFile.PkgList.write
         (OpamPath.Switch.reinstall st.switch_global.root st.switch)
@@ -234,7 +242,7 @@ let remove_from_installed ?(keep_as_root=false) st nv =
       ~reinstall:(rm (Lazy.force st.reinstall))
   in
   let has_setenv =
-    match OpamStd.Option.map OpamFile.OPAM.env (OpamSwitchState.opam_opt st nv)
+    match Option.map OpamFile.OPAM.env (OpamSwitchState.opam_opt st nv)
     with Some (_::_) -> true | _ -> false
   in
   if not OpamStateConfig.(!r.dryrun) &&

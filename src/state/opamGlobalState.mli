@@ -27,6 +27,9 @@ val all_installed: 'a global_state -> package_set
 
 val switches: 'a global_state -> switch list
 
+(** Fold over switches, using switch selections. Switch selection file
+   [switch-state] is loaded only read-only; no further checks are done on the opam root
+   version. *)
 val fold_switches:
   (switch -> switch_selections -> 'a -> 'a) -> 'b global_state -> 'a -> 'a
 
@@ -34,9 +37,9 @@ val fold_switches:
     local switch with a configuration file pointing to the current root *)
 val switch_exists: 'a global_state -> switch -> bool
 
-(** Returns the map of installed instances of the package name towards the list
-    of switches they are installed in *)
-val installed_versions: 'a global_state -> name -> switch list package_map
+(** Returns the map of all installed packages to the list of switch(es) they're
+    installed in. *)
+val all_installed_versions: 'a global_state -> switch list package_map
 
 (** Default list of repositories to get packages from, ordered by decreasing
     priority. This can be overridden by switch-specific selections, and does not
@@ -72,3 +75,7 @@ val fix_switch_list: 'a global_state -> 'a global_state
 
 (** Description used for system inferred variables *)
 val inferred_from_system: string
+
+(** Returns true is opam root is read-only. It is used to detect if opam is
+    launched in a sandbox, from an opam command (like build, install, etc.). *)
+val is_root_read_only: 'a global_state -> bool

@@ -23,6 +23,7 @@ type dependency_toggles = {
   build: bool;
   post: bool;
   test: bool;
+  dev_setup: bool;
   doc: bool;
   dev: bool;
 }
@@ -48,6 +49,7 @@ type selector =
   | Available
   | Installable
   | Pinned
+  | Latests_only
   | Depends_on of dependency_toggles * atom list
   | Required_by of dependency_toggles * atom list
   | Conflicts_with of package list
@@ -56,9 +58,14 @@ type selector =
   | Pattern of pattern_selector * string
   | Atoms of atom list
   | Flag of package_flag
+  | NotFlag of package_flag
   | Tag of string
   | From_repository of repository_name list
   | Owns_file of filename
+
+(** Returns [true] if the selector might require depexts availibility
+    information when applied using {!filter}. Returns [false] otherwise. *)
+val uses_depexts : selector -> bool
 
 (** Applies a formula of selectors to filter the package from a given switch
     state *)

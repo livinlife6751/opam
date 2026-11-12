@@ -22,7 +22,7 @@ val load:
 
     The repository state is automatically loaded if not provided.
 
-    The switch is selected, if not set, using [OpamStateConfig.get_switch] --
+    The switch is selected, if not set, using {!OpamStateConfig.get_switch} --
     which can fail if no switch is configured.
 
     Additionally, in case of a write lock, a backup is saved and a message is
@@ -44,7 +44,8 @@ val load_virtual:
 
 (** Load the switch's state file, without constructing the package maps: much
     faster than loading the full switch state *)
-val load_selections: 'a global_state -> switch -> switch_selections
+val load_selections:
+  lock_kind: 'a lock -> 'b global_state -> switch -> switch_selections
 
 (** Raw function to compute the availability of all packages, in [opams], given
     the switch configuration and the set of pinned packages. (The result is
@@ -115,9 +116,6 @@ val descr: 'a switch_state -> package -> OpamFile.Descr.t
 (** Return the descr field for the given package *)
 val descr_opt: 'a switch_state -> package -> OpamFile.Descr.t option
 
-(** Returns the full paths of overlay files under the files/ directory *)
-val files: 'a switch_state -> package -> filename list
-
 (** Return the installed package's local configuration *)
 val package_config: 'a switch_state -> name -> OpamFile.Dot_config.t
 
@@ -149,17 +147,50 @@ val is_pinned: 'a switch_state -> name -> bool
     overlay metadata, and relying on the repo's data *)
 val is_version_pinned: 'a switch_state -> name -> bool
 
-(** The set of all "dev packages" (see [is_dev_package] for a definition) *)
+(** The set of all "dev packages" (see {!is_dev_package} for a definition) *)
 val dev_packages: 'a switch_state -> package_set
 
 (** Returns the local source mirror for the given package
-    ([OpamPath.Switch.sources] or [OpamPath.Switch.pinned_package], depending on
-    wether it's pinned). *)
+    ({!OpamPath.Switch.sources} or {!OpamPath.Switch.pinned_package}, depending
+    on whether it's pinned. If it's not pinned, be mindful that the directory
+    is temporary (see {!is_source_dir_temporary}). *)
 val source_dir: 'a switch_state -> package -> dirname
+
+(** Returns [true] if the {!source_dir} of the package is meant to be a
+    temporary directory: packages that are not pinned or "dev package"
+    as defined in {!is_dev_package}. *)
+val is_source_dir_temporary: 'a switch_state -> package -> bool
+
+(** Returns the opam file overlay stored internally for pinned packages *)
+val overlay_opam_file:
+  'a switch_state -> OpamPackage.Name.t -> OpamFile.OPAM.t OpamFile.t option
 
 (** Returns the set of active external dependencies for the package, computed
     from the values of the system-specific variables *)
 val depexts: 'a switch_state -> package -> OpamSysPkg.Set.t
+
+(* {2} Helpers to retrieve computed data *)
+
+(** Return the transitive dependency closures
+    of a collection of packages.
+
+    @param depopts include optional dependencies ([depopts: foo])
+    @param build include build dependencies ([depends: foo {build}])
+    @param post include post dependencies ([depends: foo {post}])
+    @param installed only consider already-installed packages
+    @param unavailable also consider unavailable packages
+                       If the availability of packages hasn't been computed yet,
+                       setting this [false] can have a significant performance
+                       impact depending on the platform.
+*)
+val dependencies:
+  'a switch_state -> build:bool -> post:bool -> depopts:bool ->
+  installed:bool -> unavailable:bool -> package_set -> package_set
+
+(** Same as {!dependencies} but for reverse dependencies. *)
+val reverse_dependencies:
+  'a switch_state -> build:bool -> post:bool -> depopts:bool ->
+  installed:bool -> unavailable:bool -> package_set -> package_set
 
 (** Returns required system packages of each of the given packages (elements are
     not added to the map  if they don't have system dependencies) *)
@@ -178,7 +209,7 @@ val conflicts_with: 'a switch_state -> package_set -> package_set -> package_set
 (** Put the package data in a form suitable for the solver, pre-computing some
     maps and sets. Packages in the [requested] set are the ones that will get
     affected by the global [build_test] and [build_doc] flags. [test] and [doc],
-    if unspecified, are taken from [OpamStateConfig.r]. [reinstall] marks
+    if unspecified, are taken from {!OpamStateConfig.r}.  [reinstall] marks
     package not considered current in the universe, and that should therefore be
     reinstalled. If unspecified, it is the packages marked in
     [switch_state.reinstall] that are present in [requested]. *)
@@ -186,9 +217,10 @@ val universe:
   'a switch_state ->
   ?test:bool ->
   ?doc:bool ->
+  ?dev_setup:bool ->
   ?force_dev_deps:bool ->
   ?reinstall:package_set ->
-  requested:name_set ->
+  requested:package_set ->
   user_action -> universe
 
 (** Dumps the current switch state in PEF format, for interaction with Dose
@@ -206,7 +238,7 @@ val update_package_metadata:
     packages and available sets. *)
 val remove_package_metadata: package -> 'a switch_state -> 'a switch_state
 
-(** Like [update_package_metadata], but also ensures the package is pinned to
+(** Like {!update_package_metadata}, but also ensures the package is pinned to
     the given version. The version specified in the opam file, if any, takes
     precedence over the version of [package]. Also marks it for reinstall if
     changed. *)
@@ -220,6 +252,18 @@ val update_repositories:
   'a global_state -> (repository_name list -> repository_name list) ->
   switch -> unit
 
+(** {2 Invariant computation} *)
+
+(* Returns installed root packages of switch invariant *)
+val invariant_root_packages: 'a switch_state -> package_set
+
+(* Compute installed invariant dependency cone *)
+val compute_invariant_packages: 'a switch_state -> package_set
+
+(* Returns set of packages of installed compiler packages and their
+   dependencies (only build & depopts) *)
+val compiler_packages: 'a switch_state -> package_set
+
 (** {2 User interaction and reporting } *)
 
 (** Returns [true] if the switch of the state is the one set in
@@ -231,6 +275,19 @@ val is_switch_globally_set: 'a switch_state -> bool
 (** Returns a message about a package or version that couldn't be found *)
 val not_found_message: 'a switch_state -> atom -> string
 
+val unavailable_reason_raw:
+  'a switch_state -> name * OpamFormula.version_formula ->
+  [ `UnknownVersion
+  | `UnknownPackage
+  | `NoDefinition
+  | `Pinned of OpamPackage.t
+  | `Unavailable of string
+  | `ConflictsBase
+  | `ConflictsInvariant of string
+  | `MissingDepexts of string list
+  | `Default
+  ]
+
 (** Returns a printable explanation why a package is not currently available
     (pinned to an incompatible version, unmet [available:] constraints...).
     [default] is returned if no reason why it wouldn't be available was found
@@ -239,12 +296,15 @@ val unavailable_reason:
   'a switch_state -> ?default:string -> name * OpamFormula.version_formula ->
   string
 
-(** Returns whether or not the package can be upgraded to a version tagged with avoid-version *)
-val can_upgrade_to_avoid_version : OpamPackage.Name.t -> 'a switch_state -> bool
+(** Returns [true] when the package has the [avoid-version] flag and there isn't
+    already a version with that flag installed (which disables the
+    constraint) *)
+val avoid_version : 'a switch_state -> package -> bool
 
 (** Handle a cache of the opam files of installed packages *)
 module Installed_cache: sig
   type t = OpamFile.OPAM.t OpamPackage.Map.t
+  val load: OpamFilename.t -> t option
   val save: OpamFilename.t -> t -> unit
   val remove: OpamFilename.t -> unit
 end

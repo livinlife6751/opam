@@ -12,6 +12,18 @@
 (** Higher level file and directory name manipulation AND file operations,
     wrappers on OpamSystem using the filename type *)
 
+(** Returns [true] if string contains '..' between directory separators *)
+val might_escape: sep:[`Unix | `Windows | `Unspecified ] -> string -> bool
+
+(* Returns a list of elements between directory separators *)
+val split: sep:[`Unix | `Windows | `Unspecified ] -> string -> string list
+
+(** Returns [true] if the character is a directory separator *)
+val is_dir_sep: char -> bool
+
+(** Returns [true] if the string is [".."] or ["."] (relative segment) *)
+val is_rel_seg: string -> bool
+
 (** Basenames *)
 module Base: sig
   include OpamStd.ABSTRACT
@@ -32,7 +44,8 @@ val cwd: unit -> Dir.t
 (** Remove a directory *)
 val rmdir: Dir.t -> unit
 
-(** Cleans the contents of a directory, but keeps the directory in place. *)
+(** Cleans the contents of a directory, but keeps the directory in place.
+    Noop if directory doesn't exists. *)
 val cleandir: Dir.t -> unit
 
 (** Removes an empty directory, as well as any empty leading path components.
@@ -46,19 +59,18 @@ val mkdir: Dir.t -> unit
 (** List the sub-directory recursively *)
 val rec_dirs: Dir.t -> Dir.t list
 
-val dir_is_empty: Dir.t -> bool
+(** Returns whether a directory is empty.
+    Returns [None] if the directory could not be found. *)
+val dir_is_empty: Dir.t -> bool option
+
+(** Returns true if the directory is read-only. *)
+val is_dir_read_only: Dir.t -> bool
 
 (** List the sub-directory (do not recurse) *)
 val dirs: Dir.t -> Dir.t list
 
-(** Evaluate a function in a given directory *)
-val in_dir: Dir.t -> (unit -> 'a) -> 'a
-
-(** Turns an assoc list into an array suitable to be provided as environment *)
-val env_of_list: (string * string) list -> string array
-
 (** Execute a list of commands in a given directory *)
-val exec: Dir.t -> ?env:(string * string) list -> ?name:string ->
+val exec: Dir.t -> ?env:string array -> ?name:string ->
   ?metadata:(string * string) list -> ?keep_going:bool -> string list list -> unit
 
 (** Move a directory *)
@@ -67,6 +79,10 @@ val move_dir: src:Dir.t -> dst:Dir.t -> unit
 (** Copy directory [src] to [dst], that is, recursively copy the contents of
     [src] into [dst], overwriting any existing files. *)
 val copy_dir: src:Dir.t -> dst:Dir.t -> unit
+
+(** Same as [copy_dir] except it avoids copying VCS directories
+    ([.git], [.hg], [_darcs]) *)
+val copy_dir_except_vcs : src:Dir.t -> dst:Dir.t -> unit
 
 (** Link a directory *)
 val link_dir: target:Dir.t -> link:Dir.t -> unit
@@ -142,6 +158,17 @@ val open_in_bin: t -> in_channel
 val open_out: t -> out_channel
 val open_out_bin: t -> out_channel
 
+(** [with_open_out_bin filename f] opens [f] and passes the out_channel to [f].
+    If [f] raises an exception, then [filename] is deleted and then exception is
+    propagated. The out_channel does not have to be closed by [f]. *)
+val with_open_out_bin: t -> (out_channel -> unit) -> unit
+[@@deprecated "use with_open_out_bin_atomic instead"]
+
+(** [with_open_out_bin_atomic filename f] opens [f] and passes the out_channel to [f].
+    If [f] raises an exception, then [filename] will be unaltered and then exception is
+    propagated. The out_channel does not have to be closed by [f]. *)
+val with_open_out_bin_atomic: t -> (out_channel -> unit) -> unit
+
 (** Removes everything in [filename] if existed. *)
 val remove: t -> unit
 
@@ -155,6 +182,13 @@ val exists: t -> bool
     a symlink to one *)
 val opt_file: t -> t option
 
+(** Execute a function with a file in a temp directory.
+    It is always cleaned up afterwards. *)
+val with_tmp_file: (t -> 'a) -> 'a
+
+(** Provide an automatically cleaned up file in temp directory to a job *)
+val with_tmp_file_job: (t -> 'a OpamProcess.job) -> 'a OpamProcess.job
+
 (** Check whether a file has a given suffix *)
 val check_suffix: t -> string -> bool
 
@@ -164,11 +198,17 @@ val add_extension: t -> string -> t
 (** Remove the file extension *)
 val chop_extension: t -> t
 
-(** List all the filenames, recursively *)
-val rec_files: Dir.t -> t list
+(** List all the filenames, recursively.
+    Exclude VCS directories from selection if [except_vcs] is set to true. Keep
+    them otherwise. *)
+val rec_files: ?except_vcs:bool -> Dir.t -> t list
 
 (** List all the filename. Do not recurse. *)
 val files: Dir.t -> t list
+
+(** Returns alll the files, including dangling symlinks (which means that
+    not all entries will satisfy {!exists}). *)
+val files_and_links: Dir.t -> t list
 
 (** Apply a function on the contents of a file *)
 val with_contents: (string -> 'a) -> t -> 'a
@@ -219,8 +259,6 @@ val extract_in: t -> Dir.t -> unit
 
 val extract_in_job: t -> Dir.t -> exn option OpamProcess.job
 
-val make_tar_gz_job: t -> Dir.t -> exn option OpamProcess.job
-
 (** Extract a generic file *)
 val extract_generic_file: generic_file -> Dir.t -> unit
 
@@ -244,9 +282,21 @@ val remove_prefix_dir: Dir.t -> Dir.t -> string
 (** Remove a suffix from a filename *)
 val remove_suffix: Base.t -> t -> string
 
-(** Apply a patch in a directory. If [preprocess] is set to false, there is no
-    CRLF translation. Returns [None] on success, the process error otherwise *)
-val patch: ?preprocess:bool -> t -> Dir.t -> exn option OpamProcess.job
+(** [patch ~allow_unclean patch_source dir] applies a patch to directory [dir].
+    The patch source can be either [`Patch_file filename] for a patch file, or
+    [`Patch_diffs diffs] for a list of file-level changes.
+
+    @param allow_unclean decides if applying a patch on a directory which
+    differs slightly from the one described in the patch file is allowed.
+    Allowing unclean applications imitates the default behaviour of GNU Patch. *)
+val patch: allow_unclean:bool ->
+  [`Patch_file of t | `Patch_diffs of Patch.t list ] -> Dir.t ->
+  (Patch.operation list, exn) result
+
+(** [parse_patch ~dir patch_file] processes and parses a patch file.
+    Returns the parsed patch diffs or raises an exception if the patch file
+    doesn't exist or can't be parsed. *)
+val parse_patch : dir:Dir.t -> t -> Patch.t list
 
 (** Create an empty file *)
 val touch: t -> unit
@@ -263,20 +313,22 @@ val find_in_parents: (Dir.t -> bool) ->  Dir.t -> Dir.t option
 
 (** {2 Locking} *)
 
-(** See [OpamSystem.flock]. Prefer the higher level [with_flock] functions when
+(** See {!OpamSystem.flock}.  Prefer the higher level [with_flock] functions when
     possible *)
 val flock: [< OpamSystem.lock_flag ] -> ?dontblock:bool -> t -> OpamSystem.lock
 
 (** Calls [f] while holding a lock file. Ensures the lock is properly released
-    on [f] exit. Raises [OpamSystem.Locked] if [dontblock] is set and the lock
-    can't be acquired. [f] is passed the file_descr of the lock. *)
+    on [f] exit. [f] is passed the file_descr of the lock.
+    @raise OpamSystem.Locked if [dontblock] is set and the lock
+    can't be acquired. *)
 val with_flock: [< OpamSystem.lock_flag ] -> ?dontblock:bool -> t ->
   (Unix.file_descr -> 'a) -> 'a
 
 (** Calls [f] with the file lock upgraded to at least [flag], then restores the
     previous lock level. Upgrade to [`Lock_write] should never be used in
-    blocking mode as it would deadlock. Raises [OpamSystem.Locked] (but keeps
-    the lock as is) if [dontblock] is set and the lock can't be upgraded. *)
+    blocking mode as it would deadlock.
+    @raise OpamSystem.Locked (but keeps the lock as is) if [dontblock] is set
+    and the lock can't be upgraded. *)
 val with_flock_upgrade:
   [< OpamSystem.actual_lock_flag ] -> ?dontblock:bool -> OpamSystem.lock -> (Unix.file_descr -> 'a) -> 'a
 
@@ -318,5 +370,92 @@ module Attribute: sig
 
 end
 
+(* Subpathes handling *)
+module SubPath: sig
+
+  include OpamStd.ABSTRACT
+
+  (* Directory concatenation *)
+  val (/): Dir.t -> t -> Dir.t
+
+  (* Directory concatenation with an optional argument *)
+  val (/?): Dir.t -> t option -> Dir.t
+
+  (* Subpath string with no file separator conversion *)
+  val normalised_string: t -> string
+
+end
+
 (** Convert a filename to an attribute, relatively to a root *)
 val to_attribute: Dir.t -> t -> Attribute.t
+
+(** Unix type filenames.
+    '/' is always the separator regardless of the current system *)
+module Unix : sig
+  type filename = t
+
+  (** [of_string] will translate filesystem dir sep to slashes '/'. *)
+  include OpamStd.ABSTRACT
+
+  module Base : sig
+    (** [of_string] will translate filesystem dir sep to slashes '/'. *)
+    include OpamStd.ABSTRACT
+
+    (** Convert basename to a raw basename.
+        Translates filesystem dir sep to slashes '/'. *)
+    val of_base : Base.t -> t
+
+    val to_base : t -> Base.t
+  end
+
+  module Dir : sig
+    (** [of_string] will translate filesystem dir sep to slashes '/'. *)
+    include OpamStd.ABSTRACT
+
+    (** Convert dirname to a raw dirname.
+        Translates filesystem dir sep to slashes '/'. *)
+    val of_dir : Dir.t -> t
+
+    (** Convert raw dirname to a [dirname].
+        Translates slashes '/' to filesystem dir sep. *)
+    val to_dir : t -> Dir.t
+
+    val dirname : t -> t
+    val basename : t -> Base.t
+  end
+
+  module Op : sig
+    val (/): Dir.t -> string -> Dir.t
+    val (//): Dir.t -> string -> t
+  end
+
+  (** Convert filename to a raw filename.
+      Translates filesystem dir sep to slashes '/'. *)
+  val of_filename : filename -> t
+
+  (** Convert raw filename to a [filename].
+      Translates slashes '/' to filesystem dir sep. *)
+  val to_filename : t -> filename
+
+  (** Check whether a filename starts by a given Dir.t *)
+  val starts_with: Dir.t -> t -> bool
+
+  (** Remove a prefix from a file name *)
+  val remove_prefix: Dir.t -> t -> string
+
+  (** Return the base name *)
+  val basename: t -> Base.t
+
+  (** Return the directory name *)
+  val dirname: t -> Dir.t
+
+  (* [to_relative_canonical ~dir_sep filename] return [Ok canonical] where
+     [canonical] is the canonical form of [filename], using [dir_sep] as
+     separator.  If [filename] contains '..', is not relative, or resolve to a
+     '.', it error with [Error err] *)
+  val to_relative_canonical: t -> (t, string) result
+
+  (** Return the first element of the path, if not empty *)
+  val root_dir: t -> string option
+
+end

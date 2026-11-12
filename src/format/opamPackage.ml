@@ -9,9 +9,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
-open OpamStd.Op
-
 let log fmt = OpamConsole.log "PACKAGE" fmt
 let slog = OpamConsole.slog
 
@@ -29,10 +26,12 @@ module Version = struct
         | 'a'..'z' | 'A'..'Z' | '0'..'9' | '-' | '_' | '+' | '.' | '~' -> ()
         | c ->
           failwith
-            (Printf.sprintf "Invalid character '%c' in package version %S" c x))
+            (Printf.sprintf "Invalid character '%s' in package version %S"
+               (Char.escaped c) x))
       x;
     x
 
+  let default = "dev"
 
   let compare = OpamVersionCompare.compare
 
@@ -66,22 +65,20 @@ module Name = struct
   let to_string x = x
 
   let of_string x =
-    match
-      OpamStd.String.fold_left (fun acc c ->
-          if acc = Some false then acc else match c with
-            | 'a'..'z' | 'A'..'Z' -> Some true
-            | '0'..'9' | '-' | '_' | '+' -> acc
-            | _ -> Some false)
-        None x
-    with
-    | Some false ->
+    if
+      OpamCompat.String.fold_left (fun acc c ->
+          match c with
+          | 'a'..'z' | 'A'..'Z' -> false
+          | '0'..'9' | '-' | '_' | '+' -> acc
+          | c ->
+            failwith
+              (Printf.sprintf "Invalid character '%s' in package name %S"
+                 (Char.escaped c) x))
+        true x
+    then
       failwith
-        (Printf.sprintf "Invalid character in package name %S" x)
-    | None ->
-      failwith
-        (Printf.sprintf "Package name %S should contain at least one letter" x)
-    | Some true ->
-      x
+        (Printf.sprintf "Package name %S should contain at least one letter" x);
+    x
 
   let compare = OpamStd.String.compare_case
 
@@ -124,8 +121,8 @@ let version t = t.version
 let sep = '.'
 
 let of_string_opt s =
-  if OpamStd.String.contains_char s ' ' ||
-     OpamStd.String.contains_char s '\n' then
+  if String.contains s ' ' ||
+     String.contains s '\n' then
     None
   else match OpamStd.String.cut_at s sep with
     | None        -> None
@@ -158,13 +155,13 @@ let to_json nv =
      ]
 let of_json = function
   | `O dict ->
-    begin try
-        let open OpamStd.Option.Op in
-        Name.of_json (List.assoc "name" dict) >>= fun name ->
-        Version.of_json (List.assoc "version" dict) >>= fun version ->
-        Some {name; version}
-      with Not_found -> None
-    end
+    (try
+       let open OpamStd.Option.Op in
+       Name.of_json (OpamStd.List.assoc String.equal "name" dict)
+       >>= fun name ->
+       Version.of_json (OpamStd.List.assoc String.equal "version" dict)
+       >>= fun version -> Some {name; version}
+     with Not_found -> None)
   | _ -> None
 
 module O = struct
@@ -209,9 +206,11 @@ let of_dirname f =
 
 (* $DIR/$NAME.$VERSION/opam *)
 let of_filename f =
-  if OpamFilename.basename f = OpamFilename.Base.of_string "opam" then
+  if OpamFilename.Base.equal
+      (OpamFilename.basename f)
+      (OpamFilename.Base.of_string OpamPathName.opam_f) then
     of_dirname (OpamFilename.dirname f)
-  else if OpamFilename.check_suffix f ".opam" then
+  else if OpamFilename.check_suffix f OpamPathName.opam_suffix then
     of_string_opt OpamFilename.(Base.to_string (basename (chop_extension f)))
   else
     None
@@ -233,7 +232,7 @@ let list dir =
         | Some p ->
           if not (Set.mem p set) then Set.add p set
           else
-            let suffix = Filename.concat (to_string p) "opam" in
+            let suffix = Filename.concat (to_string p) OpamPathName.opam_f in
             let files = List.filter (OpamFilename.ends_with suffix) files in
             OpamConsole.error_and_exit `File_error
               "Multiple definition of package %s in %s:\n%s"

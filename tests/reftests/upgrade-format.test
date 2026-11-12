@@ -2,6 +2,7 @@
 ### <opam-core.opam>
 opam-version: "1.2"
 version: "2.0.7"
+license: "ISC"
 maintainer: "opam-devel@lists.ocaml.org"
 authors: [
   "Vincent Bernardoff <vb@luminar.eu.org>"
@@ -34,7 +35,7 @@ conflicts: "extlib-compat"
 available: ocaml-version >= "4.02.3"
 ### opam show --raw ./opam-core.opam
 [WARNING] Failed checks on opam-core package definition from source at file://${BASEDIR}:
-             error 57: Synopsis and description must not be both empty
+             error 57: Synopsis must not be empty
 opam-version: "2.0"
 name: "opam-core"
 version: "2.0.7"
@@ -51,6 +52,7 @@ authors: [
   "Ralf Treinen <ralf.treinen@pps.jussieu.fr>"
   "Frederic Tuong <tuong@users.gforge.inria.fr>"
 ]
+license: "ISC"
 homepage: "https://opam.ocaml.org/"
 bug-reports: "https://github.com/ocaml/opam/issues"
 depends: [
@@ -74,21 +76,21 @@ opam-core is now pinned to file://${BASEDIR} (version 2.0.7)
 <><> Installing new switch packages <><><><><><><><><><><><><><><><><><><><><><>
 Switch invariant: ["ocaml-system"]
 The following actions will be faked:
-  - install base-bigarray base   [required by opam-core]
-  - install base-threads  base   [required by dune]
-  - install base-unix     base   [required by opam-core]
+=== install 14 packages
+  - install base-bigarray base           [required by opam-core]
+  - install base-threads  base           [required by dune]
+  - install base-unix     base           [required by opam-core]
+  - install conf-m4       1              [required by ocamlfind]
+  - install cppo          1.6.6          [required by opam-core]
+  - install dune          2.5.1          [required by opam-core]
+  - install ocaml         4.08.0         [required by opam-core]
+  - install ocaml-config  1              [required by ocaml]
   - install ocaml-system  4.08.0
-  - install conf-m4       1      [required by ocamlfind]
-  - install ocaml-config  1      [required by ocaml]
-  - install ocaml         4.08.0 [required by opam-core]
-  - install seq           base   [required by re]
-  - install ocamlfind     1.8.1  [required by ocamlgraph]
-  - install dune          2.5.1  [required by opam-core]
-  - install ocamlgraph    1.8.8  [required by opam-core]
-  - install re            1.9.0  [required by opam-core]
-  - install cppo          1.6.6  [required by opam-core]
-  - install opam-core     2.0.7*
-===== 14 to install =====
+  - install ocamlfind     1.8.1          [required by ocamlgraph]
+  - install ocamlgraph    1.8.8          [required by opam-core]
+  - install opam-core     2.0.7 (pinned)
+  - install re            1.9.0          [required by opam-core]
+  - install seq           base           [required by re]
 
 <><> Processing actions <><><><><><><><><><><><><><><><><><><><><><><><><><><><>
 Faking installation of base-bigarray.base
@@ -106,27 +108,28 @@ Faking installation of seq.base
 Faking installation of re.1.9.0
 Faking installation of opam-core.2.0.7
 Done.
-### opam pin add git://github.com/ocaml/opam.git#59a71e3cf1 -yn
+### opam pin add git+https://github.com/ocaml/opam.git#59a71e3cf1 -yn
 This will pin the following packages: opam-client, opam-core, opam-devel, opam-format, opam-installer, opam-repository, opam-solver, opam-state. Continue? [Y/n] y
-opam-client is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-client is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
 [NOTE] Package opam-core is currently pinned to file://${BASEDIR} (version 2.0.7).
-opam-core is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
-opam-devel is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
-opam-format is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
-opam-installer is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
-opam-repository is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
-opam-solver is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
-opam-state is now pinned to git://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-core is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-devel is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-format is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-installer is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-repository is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-solver is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
+opam-state is now pinned to git+https://github.com/ocaml/opam.git#59a71e3cf1 (version 2.1.0~beta3)
 ### opam install opam-format --show
 
 <><> Synchronising pinned packages ><><><><><><><><><><><><><><><><><><><><><><>
 [opam-format.2.1.0~beta3] synchronised (no changes)
 
 The following actions would be performed:
-  - upgrade opam-core        2.0.7 to 2.1.0~beta3* [required by opam-format]
-  - install opam-file-format 2.0.0                 [required by opam-format]
-  - install opam-format      2.1.0~beta3*
-===== 2 to install | 1 to upgrade =====
+=== install 2 packages
+  - install opam-file-format 2.0.0                         [required by opam-format]
+  - install opam-format      2.1.0~beta3 (pinned)
+=== upgrade 1 package
+  - upgrade opam-core        2.0.7 to 2.1.0~beta3 (pinned) [required by opam-format]
 ### : Testing preserved format with upgrade :
 ### <packages/foo/foo.1/opam>
 opam-version: "2.0"

@@ -19,6 +19,10 @@ type 'a error = [
 ]
 type ('a,'b) status = [ 'a success | 'b error ]
 
+type ('a, 'b) either = ('a, 'b) OpamCompat.Either.t =
+  | Left of 'a
+  | Right of 'b
+
 (** {2 Filenames} *)
 
 (** Basenames *)
@@ -29,6 +33,11 @@ type dirname = OpamFilename.Dir.t
 
 (** Filenames *)
 type filename = OpamFilename.t
+
+type subpath = OpamFilename.SubPath.t
+
+type unix_filename = OpamFilename.Unix.t
+type unix_dirname = OpamFilename.Unix.Dir.t
 
 (** Set of files *)
 type filename_set = OpamFilename.Set.t
@@ -113,6 +122,9 @@ type package_flag =
                      .install, but likely has depexts *)
   | Pkgflag_AvoidVersion (** This version of the package will only be installed if
                              strictly required *)
+  | Pkgflag_Deprecated (** This version of the package will only be installed if
+                           strictly required and will print a deprecation
+                           warning *)
   | Pkgflag_Unknown of string (** Used for error reporting, otherwise ignored *)
 
 (** At some point we want to abstract so that the same functions can be used
@@ -203,8 +215,10 @@ type 'a filter_or_constraint =
   | Filter of filter
   | Constraint of (relop * 'a)
 
+type condition = filter filter_or_constraint generic_formula
+
 type filtered_formula =
-  (name * filter filter_or_constraint OpamFormula.formula) OpamFormula.formula
+  (name * condition) OpamFormula.formula
 
 (** {2 Solver} *)
 
@@ -233,7 +247,7 @@ type 'a inst_action = [
 type 'a concrete_action = [
   | 'a atomic_action
   | `Build of 'a
-  | `Fetch of 'a
+  | `Fetch of 'a list
 ]
 
 type 'a action = [
@@ -249,6 +263,7 @@ type 'a cause =
   | Conflicts_with of 'a list
   | Upstream_changes
   | Requested
+  | Unavailable
   | Unknown
 
 (** Solver result *)
@@ -265,7 +280,7 @@ type solution_result =
   | Partial_error of actions_result
 
 (** Solver result *)
-type ('a, 'b) result =
+type ('a, 'b) solver_result =
   | Success of 'a
   | Conflicts of 'b
 
@@ -274,9 +289,10 @@ type solver_criteria = [ `Default | `Upgrade | `Fixup ]
 (** Solver request *)
 type 'a request = {
   criteria: solver_criteria;
-  wish_install: 'a conjunction;
+  wish_install: 'a OpamFormula.formula;
   wish_remove : 'a conjunction;
   wish_upgrade: 'a conjunction;
+  wish_all: 'a conjunction;
   extra_attributes: string list;
 }
 
@@ -288,17 +304,16 @@ type user_action =
 type universe = {
   u_packages : package_set;
   u_installed: package_set;
-  u_available: package_set;
+  u_available: package_set Lazy.t;
   u_depends  : filtered_formula package_map;
   u_depopts  : filtered_formula package_map;
   u_conflicts: formula package_map;
   u_action   : user_action;
   u_installed_roots: package_set;
   u_pinned   : package_set;
-  u_base     : package_set;
   u_invariant: formula;
   u_reinstall: package_set;
-  u_attrs    : (string * package_set) list;
+  u_attrs    : (string * package_set Lazy.t) list;
 }
 
 (** {2 Command line arguments} *)
@@ -307,8 +322,10 @@ type universe = {
 type pin_kind = [ `version | OpamUrl.backend ]
 
 (** Shell compatibility modes *)
+type powershell_host = OpamStd.Sys.powershell_host = Powershell_pwsh | Powershell
 type shell = OpamStd.Sys.shell =
-    SH_sh | SH_bash | SH_zsh | SH_csh | SH_fish
+  | SH_sh | SH_bash | SH_zsh | SH_csh | SH_fish | SH_pwsh of powershell_host
+  | SH_cmd
 
 (** {2 Generic command-line definitions with filters} *)
 
@@ -385,12 +402,76 @@ type stats = {
   s_remove   : int;
 }
 
-(** Environement variables: var name, value, optional comment *)
-type env = (string * string * string option) list
+(** Environment variables: var name, value, optional comment *)
+type env = (OpamStd.Env.Name.t * string * string option) list
+
+(** Transformation format for environment variable containing paths *)
+type path_format =
+  | Host
+  (** use host interpretation of path format *)
+
+  | Host_quoted
+  (** use host interpretation of path format and quote resulting path if it
+      contains the separator character *)
+
+  | Target
+  (** use the target interpretation of path format (opam file one) *)
+
+  | Target_quoted
+  (** use the target interpretation of path format (opam file one) and quote
+      path if it contains the separator character *)
+
+(** Separator for environment variables containing several paths *)
+type separator =
+  | SColon
+  (** Colon separator, i.e. ':' *)
+
+  | SSemiColon
+  (** Semi-colon separator, i.e. ';' *)
+
+type spf_resolved = [ `resolved ]
+type spf_unresolved = [ `unresolved ]
+
+(** Transformation for environment variables containing paths. They are either
+    unresolved at the beginning {!SPF_Unresolved}, then propagated as resolved
+    {!SPF_Resolved}. *)
+type _ separator_path_format =
+  | SPF_Resolved:
+      (separator * path_format) option
+      -> spf_resolved separator_path_format
+  | SPF_Unresolved:
+      (separator * filter) generic_formula
+      * (path_format * filter) generic_formula
+      -> spf_unresolved separator_path_format
+
+(* Sub-typing for the constructors of env_update_op_kind - euok_internal
+   constructors cannot be serialised. *)
+type euok_writeable = [ `writeable ]
+type euok_internal = [ `internal | `writeable ]
+
+(* Type _ env_update_ok_kind includes the constructors of
+   OpamParserTypes.env_update_op (the "writeable" constructors) but permits
+   additional "internal" constructors to be added. The GADT type parameter is
+   then used in type env_update to ensure that "internal" updates must be
+   filtered out before writing. *)
+type _ env_update_op_kind =
+  (* Initial constructors _must_ match OpamParserTypes.env_update_op *)
+| Eq : [> euok_writeable] env_update_op_kind
+| PlusEq : [> euok_writeable] env_update_op_kind
+| EqPlus : [> euok_writeable] env_update_op_kind
+| ColonEq : [> euok_writeable] env_update_op_kind
+| EqColon : [> euok_writeable] env_update_op_kind
+| EqPlusEq : [> euok_writeable] env_update_op_kind
+| Cygwin : [> euok_internal] env_update_op_kind
 
 (** Environment updates *)
-type env_update = string * OpamParserTypes.FullPos.env_update_op_kind * string * string option
-(** var, update_op, value, comment *)
+type ('a, 'b) env_update = {
+  envu_var : string;
+  envu_op : 'b env_update_op_kind;
+  envu_value : string;
+  envu_comment : string option;
+  envu_rewrite: 'a separator_path_format option;
+}
 
 (** Tags *)
 type tags = OpamStd.String.Set.t OpamStd.String.SetMap.t

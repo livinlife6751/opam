@@ -43,7 +43,7 @@ let list gt ~print_short =
         in
         let comp =
           OpamPackage.Map.filter
-            (fun nv _ -> OpamPackage.Set.mem nv sel.sel_roots)
+            (fun nv _ -> OpamPackage.Set.mem nv sel.sel_compiler)
             opams
           |> ifempty opams
         in
@@ -54,8 +54,7 @@ let list gt ~print_short =
           |> ifempty comp
         in
         let conf =
-          OpamFile.Switch_config.read_opt
-            (OpamPath.Switch.switch_config gt.root sw)
+          OpamStateConfig.Switch.read_opt ~lock_kind:`Lock_read gt sw
         in
         let descr = match conf with
           | Some c -> c.OpamFile.Switch_config.synopsis
@@ -186,7 +185,7 @@ let remove gt ?(confirm = true) switch =
   else gt
 
 let set_invariant_raw st invariant =
-  let switch_config = {st.switch_config with invariant} in
+  let switch_config = {st.switch_config with invariant = Some invariant} in
   let st = {st with switch_invariant = invariant; switch_config } in
   if not (OpamStateConfig.(!r.dryrun) || OpamClientConfig.(!r.show)) then
     OpamSwitchAction.install_switch_config st.switch_global.root st.switch
@@ -205,7 +204,6 @@ let install_compiler
      OpamEnv.check_and_print_env_warning t);
     t
   end else
-  let () = OpamRepositoryState.check_last_update () in
   let atoms = OpamFormula.atoms invariant in
   let names_of_atoms at = OpamPackage.Name.Set.of_list (List.map fst at) in
   let comp_roots = names_of_atoms atoms in
@@ -218,11 +216,10 @@ let install_compiler
     (OpamFileTools.dep_formula_to_string invariant);
   let solution =
     OpamSolution.resolve t Switch
-      ~orphans:OpamPackage.Set.empty
-      ~requested:roots
+      ~requested:(OpamPackage.packages_of_names t.packages roots)
       (OpamSolver.request ~install:additional_installs ())
   in
-  let solution = match solution with
+  let (_, solution) as action_solution = match solution with
     | Success s -> s
     | Conflicts cs ->
       OpamConsole.error
@@ -240,46 +237,17 @@ let install_compiler
         "Inconsistent resolution of packages:\n%s"
         (OpamSolver.string_of_stats stats)
   in
-  let to_install_pkgs = OpamSolver.new_packages solution in
-  let base_comp = OpamPackage.packages_of_names to_install_pkgs comp_roots in
-  let has_comp_flag =
-    let is_comp nv =
-      try OpamFile.OPAM.has_flag Pkgflag_Compiler (OpamSwitchState.opam t nv)
-      with Not_found -> false
-    in
-    (* Packages with the Compiler flag, or with a direct dependency with that
-       flag (just for the warning) *)
-    OpamPackage.Set.filter
-      (fun nv ->
-         is_comp nv ||
-         OpamPackage.Set.exists is_comp
-           (OpamFormula.packages t.packages
-              (OpamPackageVar.all_depends ~filter_default:true t
-                 (OpamSwitchState.opam t nv))))
-      base_comp
-  in
   if invariant = OpamFormula.Empty then
     OpamConsole.note
       "No invariant was set, you may want to use `opam switch set-invariant' \
-       to keep a stable compiler version on upgrades."
-  else if OpamPackage.Set.is_empty has_comp_flag then
-    OpamConsole.note
-      "Packages %s don't have the 'compiler' flag set (nor any of their \
-       direct dependencies).\n\
-       You may want to use `opam switch set-invariant' to keep a stable \
-       compiler version on upgrades."
-      (OpamStd.List.concat_map ", " OpamPackage.to_string
-         (OpamPackage.Set.elements base_comp));
+       to keep a stable compiler version on upgrades.";
   let t =
     if t.switch_config.OpamFile.Switch_config.synopsis = "" then
       let synopsis =
-        match OpamPackage.Set.elements base_comp with
-        | [] -> OpamSwitch.to_string t.switch
-        | [pkg] ->
-          let open OpamStd.Option.Op in
-          (OpamSwitchState.opam_opt t pkg >>= OpamFile.OPAM.synopsis) +!
-          OpamPackage.to_string pkg
-        | pkgs -> OpamStd.List.concat_map " " OpamPackage.to_string pkgs
+        if invariant = OpamFormula.Empty then
+          OpamSwitch.to_string t.switch
+        else
+          OpamFormula.to_string invariant
       in
       let switch_config =
         { t.switch_config with OpamFile.Switch_config.synopsis }
@@ -290,22 +258,34 @@ let install_compiler
       { t with switch_config }
     else t
   in
-  let t = { t with compiler_packages = base_comp } in
-  let solution =
+  let t =
+    let base_comp =
+      OpamSwitchState.compute_invariant_packages
+        { t with installed = t.installed
+                             -- (OpamSolver.removed_packages solution)
+                             ++ (OpamSolver.new_packages solution) }
+    in
+    { t with compiler_packages = base_comp }
+  in
+  let skip =
     if deps_only then
-      OpamSolver.filter_solution (fun nv ->
-          not (OpamPackage.Name.Set.mem nv.name add_names))
-        solution
-    else solution
+      let pkgs =
+        OpamPackage.packages_of_names (OpamSolver.new_packages solution)
+          add_names
+      in
+      OpamPackage.Set.fold (fun nv map -> OpamPackage.Map.add nv nv map)
+        pkgs OpamPackage.Map.empty
+    else OpamPackage.Map.empty
   in
   let t, result =
     OpamSolution.apply t
       ~ask:(OpamClientConfig.(!r.show) || ask)
-      ~requested:roots
-      ~add_roots:roots
-      solution in
+      ~requested:(OpamPackage.packages_of_names t.packages roots)
+      ~add_roots:roots ~skip
+      action_solution in
   OpamSolution.check_solution ~quiet:OpamClientConfig.(not !r.show) t
     (Success result);
+  OpamSwitchAction.write_selections t;
   t
 
 let create
@@ -338,13 +318,13 @@ let create
       let switch_config =
         OpamSwitchAction.gen_switch_config gt.root ?repos switch ~invariant
       in
-      let st = { st with switch_invariant = invariant } in
+      let st = { st with switch_invariant = invariant; switch_config } in
       let available_packages =
         lazy (OpamSwitchState.compute_available_packages gt switch switch_config
                 ~pinned:OpamPackage.Set.empty
                 ~opams:st.opams)
       in
-      gt, { st with switch; switch_config; available_packages }
+      gt, { st with switch; available_packages }
   in
   match post st with
   | ret, st ->
@@ -359,12 +339,16 @@ let create
     let () =
       try OpamStd.Exn.fatal e with e ->
         OpamStd.Exn.finalise e @@ fun () ->
-        OpamConsole.warning "Switch %s left partially installed"
+        OpamConsole.error
+          "Switch %s left %s installed.\n\
+           To clean it, use 'opam switch remove %s'"
+          (OpamConsole.colorise `underline (OpamSwitch.to_string st.switch))
+          (OpamConsole.colorise `bold "partially")
           (OpamSwitch.to_string st.switch)
     in
     OpamStd.Exn.finalise e @@ fun () ->
     let gt, st =
-      if OpamConsole.confirm "Switch initialisation failed: clean up? \
+      if OpamConsole.confirm ~name:"switch-clean-up" "Switch initialisation failed: clean up? \
                               ('n' will leave the switch partially installed)"
       then clear_switch gt st.switch, st
       else if update_config && not simulate
@@ -393,7 +377,20 @@ let switch lock gt switch =
     (OpamSwitch.to_string switch) (OpamSwitch.to_string switch)
     (OpamStd.Format.itemize OpamSwitch.to_string installed_switches)
 
-let import_t ?ask importfile t =
+let switch_previous lock gt =
+  match OpamFile.Config.previous_switch gt.config with
+  | Some switch_name ->
+    OpamConsole.msg
+      (if OpamStateConfig.(!r.dryrun) || OpamClientConfig.(!r.show)
+       then "Would select opam switch %s.\n"
+       else "Selecting opam switch %s.\n")
+      (OpamConsole.colorise `yellow (OpamSwitch.to_string switch_name));
+    switch lock gt switch_name
+  | None ->
+    OpamConsole.error_and_exit `Not_found
+      "No previously used switch could be found"
+
+let import_t ?ask ?(deps_only=false) importfile t =
   log "import switch";
 
   let extra_files = importfile.OpamFile.SwitchExport.extra_files in
@@ -401,9 +398,8 @@ let import_t ?ask importfile t =
     OpamPath.Switch.extra_files_dir t.switch_global.root t.switch
   in
   OpamHash.Map.iter (fun hash content ->
-      let value = Base64.decode_string content in
-      let my = OpamHash.compute_from_string ~kind:(OpamHash.kind hash) value in
-      if OpamHash.contents my = OpamHash.contents hash then
+      let value = Base64.decode_exn ~pad:false content in
+      if OpamHash.check_string value hash then
         let dst =
           let base = OpamFilename.Base.of_string (OpamHash.contents hash) in
           OpamFilename.create xfiles_dir base
@@ -414,6 +410,26 @@ let import_t ?ask importfile t =
 
   let import_sel = importfile.OpamFile.SwitchExport.selections in
   let import_opams = importfile.OpamFile.SwitchExport.overlays in
+
+  (* Check that pinned packages need reinstall *)
+  let to_reinstall =
+    OpamPackage.Name.Map.fold (fun name imported reinst ->
+        try
+          let pkg =
+            OpamSwitchState.find_installed_package_by_name t name
+          in
+          let installed = OpamSwitchState.opam t pkg in
+          if OpamFile.OPAM.effectively_equal
+              ~modulo_state:true installed imported then
+            reinst
+          else OpamPackage.Set.add pkg reinst
+        with Not_found -> reinst)
+      import_opams OpamPackage.Set.empty
+  in
+  let t =
+    { t with reinstall =
+               lazy OpamPackage.Set.Op.(Lazy.force t.reinstall ++ to_reinstall) }
+  in
 
   let opams =
     OpamPackage.Name.Map.fold (fun name opam opams ->
@@ -444,6 +460,11 @@ let import_t ?ask importfile t =
     else
       t.compiler_packages,
       import_sel.sel_installed -- import_sel.sel_compiler
+  in
+  let to_install =
+    if deps_only then
+      to_install -- (import_sel.sel_roots -- import_sel.sel_compiler)
+    else to_install
   in
 
   let t =
@@ -484,14 +505,9 @@ let import_t ?ask importfile t =
     let add_roots = OpamPackage.names_of_packages import_sel.sel_roots in
 
     OpamSolution.resolve_and_apply ?ask t Import
-      ~requested:(OpamPackage.Name.Set.of_list @@ List.map fst to_import)
+      ~requested:((to_install %% available) ++ unavailable_version)
       ~add_roots
-      ~orphans:OpamPackage.Set.empty
-      { wish_install = to_import;
-        wish_remove  = [];
-        wish_upgrade = [];
-        criteria = `Default;
-        extra_attributes = []; }
+      (OpamSolver.request ~install:to_import ())
   in
   OpamSolution.check_solution t solution;
   OpamFilename.rmdir xfiles_dir;
@@ -511,46 +527,59 @@ let import_t ?ask importfile t =
             opam)
       pinned;
     (* Save new pinnings *)
-    let sel = OpamSwitchState.load_selections t.switch_global t.switch in
+    let sel =
+      OpamSwitchState.load_selections ~lock_kind:`Lock_write
+        t.switch_global t.switch
+    in
     S.write
       (OpamPath.Switch.selections t.switch_global.root t.switch)
       { sel with sel_pinned = pinned }
   end;
   t
 
-let freeze_opam src_dir nv opam =
-  match OpamFile.OPAM.url opam with
-  | None -> opam
-  | Some url ->
-    let url_t = OpamFile.URL.url url in
-    match url_t.backend with
-    | #OpamUrl.version_control ->
-      (match OpamProcess.Job.run
-               (OpamRepository.revision (src_dir nv) url_t) with
-      | None ->
-        OpamConsole.error_and_exit `Not_found
-          "Unable to retrieve %s url revision: %s, \
-           it can't be exported with --freeze."
-          (OpamPackage.to_string nv)
-          (OpamUrl.to_string url_t)
-      | Some hash ->
-        OpamFile.OPAM.with_url
-          (OpamFile.URL.with_url
-             { url_t with hash = Some (OpamPackage.Version.to_string hash) }
-             url)
-          opam)
-    | `http ->
-      (match OpamFile.URL.checksum url with
-       | [] ->
-         OpamConsole.error_and_exit `Not_found
-           "%s url doesn't have an associated checksum, \
-            it can't be exported with --freeze."
-           (OpamPackage.Name.to_string nv.name)
-       | _ -> opam)
-    | `rsync ->
+let freeze_url src_dir nv url =
+  let url_t = OpamFile.URL.url url in
+  match url_t.backend with
+  | #OpamUrl.version_control ->
+    (match OpamProcess.Job.run
+             (OpamRepository.revision (src_dir nv) url_t) with
+    | None ->
       OpamConsole.error_and_exit `Not_found
-        "%s is path pinned, it can't be exported with --freeze."
-        (OpamPackage.Name.to_string nv.name)
+        "Unable to retrieve %s url revision: %s, \
+         it can't be exported with --freeze."
+        (OpamPackage.to_string nv)
+        (OpamUrl.to_string url_t)
+    | Some hash ->
+      OpamFile.URL.with_url
+        { url_t with hash = Some hash }
+        url)
+  | `http ->
+    (match OpamFile.URL.checksum url with
+     | [] ->
+       OpamConsole.error_and_exit `Not_found
+         "%s url doesn't have an associated checksum, \
+          it can't be exported with --freeze."
+         (OpamPackage.Name.to_string nv.name)
+     | _ -> url)
+  | `rsync ->
+    OpamConsole.error_and_exit `Not_found
+      "%s is path pinned, it can't be exported with --freeze."
+      (OpamPackage.Name.to_string nv.name)
+
+let freeze_opam src_dir nv opam =
+  let url =
+    Stdlib.Option.map
+      (fun url -> freeze_url src_dir nv url)
+      (OpamFile.OPAM.url opam)
+  in
+  let extra_sources =
+    List.map
+      (fun (name, url) -> (name, freeze_url src_dir nv url))
+      (OpamFile.OPAM.extra_sources opam)
+  in
+  opam |>
+  OpamFile.OPAM.with_url_opt url |>
+  OpamFile.OPAM.with_extra_sources extra_sources
 
 let export rt ?(freeze=false) ?(full=false)
     ?(switch=OpamStateConfig.get_switch ()) filename =
@@ -558,7 +587,10 @@ let export rt ?(freeze=false) ?(full=false)
   let export =
     OpamFilename.with_flock `Lock_none (OpamPath.Switch.lock root switch)
     @@ fun _ ->
-    let selections = S.safe_read (OpamPath.Switch.selections root switch) in
+    let selections =
+      OpamStateConfig.Switch.safe_read_selections
+        ~lock_kind:`Lock_none rt.repos_global switch
+    in
     let opams =
       let read_opams read pkgs =
         let src_dir nv =
@@ -584,7 +616,7 @@ let export rt ?(freeze=false) ?(full=false)
           selections.sel_pinned
       in
       if not full then overlays else
-        OpamPackage.Map.union (fun a _ -> a) overlays
+        OpamPackage.Map.strict_union (fun a _ -> a) overlays
         @@ read_opams (fun nv -> OpamFile.OPAM.read_opt
                           (OpamPath.Switch.installed_opam root switch nv))
           (selections.sel_installed -- selections.sel_pinned)
@@ -595,18 +627,19 @@ let export rt ?(freeze=false) ?(full=false)
         opams OpamPackage.Name.Map.empty
     in
     let extra_files =
-      let repos_roots = OpamRepositoryState.get_root rt in
+      let get_repo_files = OpamRepositoryState.get_repo_files rt in
       OpamPackage.Map.fold (fun nv opam hmap ->
-          match OpamFile.OPAM.get_extra_files ~repos_roots opam with
+          match OpamFile.OPAM.get_extra_files ~get_repo_files opam with
           | [] -> hmap
           | files ->
             let hmap, err =
-              List.fold_left (fun (hmap,err) (file, base, hash) ->
-                  if OpamFilename.exists file &&
-                     OpamHash.check_file (OpamFilename.to_string file) hash then
-                    let value = Base64.encode_string (OpamFilename.read file) in
+              List.fold_left (fun (hmap,err) (base, content, hash) ->
+                  match content with
+                  | Some (lazy content) when
+                      OpamHash.check_string content hash ->
+                    let value = Base64.encode_string ~pad:false content in
                     OpamHash.Map.add hash value hmap, err
-                  else hmap, base::err)
+                  | None | Some _ -> hmap, base::err)
                 (hmap,[]) files
             in
             if err <> [] then
@@ -654,7 +687,7 @@ let reinstall init_st =
              overlays = OpamPackage.Name.Map.empty; }
     st
 
-let import st filename =
+let import st ?deps_only filename =
   let import_str = match filename with
     | None   -> OpamSystem.string_of_channel stdin
     | Some f -> OpamFilename.read (OpamFile.filename f)
@@ -670,7 +703,7 @@ let import st filename =
           overlays = OpamPackage.Name.Map.empty }
       with e1 -> OpamStd.Exn.fatal e1; raise e
   in
-  import_t importfile st
+  import_t ?deps_only importfile st
 
 let set_invariant ?(force=false) st invariant =
   let satisfied = OpamFormula.satisfies_depends st.installed invariant in
@@ -689,21 +722,6 @@ let set_invariant ?(force=false) st invariant =
       (OpamStd.List.concat_map ", "
          OpamPackage.Name.to_string
          (OpamPackage.Name.Set.elements name_unknown));
-  let packages = OpamFormula.packages st.installed invariant in
-  let not_comp =
-    OpamPackage.Set.filter (fun nv ->
-        match OpamSwitchState.opam_opt st nv with
-        | Some opam -> not (OpamFile.OPAM.has_flag Pkgflag_Compiler opam)
-        | None -> false)
-      packages
-  in
-  if not (OpamPackage.Set.is_empty not_comp) then
-    OpamConsole.warning
-      "Packages %s don't have the 'compiler' flag set."
-      (OpamStd.Format.pretty_list
-         (List.map OpamPackage.Name.to_string
-            (OpamPackage.Name.Set.elements
-               (OpamPackage.names_of_packages not_comp))));
   set_invariant_raw st invariant
 
 let get_compiler_packages ?repos rt =
@@ -728,11 +746,17 @@ let guess_compiler_invariant ?repos rt strings =
   in
   let opams = OpamRepositoryState.build_index rt repos  in
   let packages = OpamPackage.keys opams in
-  let compiler_packages =
-    OpamPackage.Map.filter
-      (fun _ -> OpamFile.OPAM.has_flag Pkgflag_Compiler)
-      opams
-    |> OpamPackage.keys
+  let compiler_packages, removed_compiler_packages =
+    OpamPackage.Map.fold (fun nv opam (comp, avoid) ->
+        if OpamFile.OPAM.has_flag Pkgflag_Compiler opam then
+          if OpamFile.OPAM.has_flag Pkgflag_AvoidVersion opam
+          || OpamFile.OPAM.has_flag Pkgflag_Deprecated opam then
+            comp, OpamPackage.Set.add nv avoid
+          else
+            OpamPackage.Set.add nv comp, avoid
+        else
+          comp, avoid)
+      opams OpamPackage.Set.(empty, empty)
   in
   let invariant =
     List.fold_left (fun acc str ->
@@ -745,13 +769,27 @@ let guess_compiler_invariant ?repos rt strings =
         with Failure _ | Not_found ->
         try
           let v = OpamPackage.Version.of_string str in
-          let candidates =
-            OpamPackage.Set.filter (fun nv -> nv.version = v)
-              compiler_packages
+          let filter =
+            OpamPackage.Set.filter (fun nv ->
+                OpamPackage.Version.equal nv.version v)
           in
-          if OpamPackage.Set.is_empty candidates then
-            raise Not_found
-          else
+          let candidates =
+            let candidates = filter compiler_packages in
+            if OpamPackage.Set.is_empty candidates then
+              let avoided_candidates = filter removed_compiler_packages in
+              if OpamPackage.Set.is_empty avoided_candidates then
+                raise Not_found
+              else
+                (if not (OpamPackage.Set.is_singleton avoided_candidates) then
+                   OpamConsole.note
+                     "Compilers found for version %s are all flagged with \
+                      'avoid-version'.\nIt is better to use a more explicit \
+                      command like \
+                      'opam switch create <switch-name> <package-name.version>'"
+                     str;
+                 avoided_candidates)
+            else candidates
+          in
           let disj =
             OpamPackage.Set.fold
               (fun nv acc ->

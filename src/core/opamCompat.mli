@@ -8,102 +8,85 @@
 (*                                                                        *)
 (**************************************************************************)
 
-module String
-#if OCAML_VERSION >= (4, 3, 0)
-= String
-#else
-: sig
-  include module type of struct include String end
-
-  val lowercase_ascii : string -> string
-  val uppercase_ascii : string -> string
-  val capitalize_ascii : string -> string
+module Gc : sig
+  (* NOTE: OCaml >= 5.4; we don't expose the suspended_collection_work as
+           it's not needed by opam and it complicates the backport *)
+  val ramp_up : (unit -> 'a) -> 'a
 end
-#endif
 
-module Char
-#if OCAML_VERSION >= (4, 3, 0)
-= Char
-#else
-: sig
-  include module type of struct include Char end
+module String : sig
+  (* NOTE: OCaml >= 4.13 *)
+  val exists: (char -> bool) -> string -> bool
 
-  val lowercase_ascii: char -> char
-  val uppercase_ascii: char -> char
+  (* NOTE: OCaml >= 4.13 *)
+  val starts_with: prefix:string -> string -> bool
+
+  (* NOTE: OCaml >= 4.13 *)
+  val ends_with: suffix:string -> string -> bool
+
+  (* NOTE: OCaml >= 4.13 *)
+  val for_all: (char -> bool) -> string -> bool
+
+  (* NOTE: OCaml >= 4.13 *)
+  val fold_left: ('a -> char -> 'a) -> 'a -> string -> 'a
 end
-#endif
 
-module Printexc
-#if OCAML_VERSION >= (4, 5, 0)
-= Printexc
-#else
-: sig
-  include module type of struct include Printexc end
+module Seq : sig
+  (* NOTE: OCaml >= 4.14 *)
+  val find_map: ('a -> 'b option) -> 'a Seq.t -> 'b option
 
-  val raise_with_backtrace: exn -> raw_backtrace -> 'a
+  (* NOTE: OCaml >= 4.14 *)
+  val to_dispenser : 'a Seq.t -> unit -> 'a option
 end
-#endif
 
-module Unix
-#if OCAML_VERSION >= (4, 6, 0)
-= Unix
-#else
-: sig
-  include module type of struct include Unix end
-
-  val map_file : Unix.file_descr -> ?pos:int64 -> ('a, 'b) Bigarray.kind ->
-                 'c Bigarray.layout -> bool -> int array ->
-                 ('a, 'b, 'c) Bigarray.Genarray.t
+module Either : sig
+  (* NOTE: OCaml >= 4.12 *)
+  type ('a, 'b) t =
+    | Left of 'a
+    | Right of 'b
 end
-#endif
 
-module Uchar
-#if OCAML_VERSION >= (4, 3, 0)
-= Uchar
-#else
-: sig
-  type t
+module Lazy : sig
+  (* NOTE: OCaml >= 4.13 *)
+  val map : ('a -> 'b) -> 'a Lazy.t -> 'b Lazy.t
 
-  val of_int : int -> t
-  external to_int : t -> int = "%identity"
+  (* NOTE: OCaml >= 4.13 *)
+  val map_val: ('a -> 'b) -> 'a Lazy.t -> 'b Lazy.t
 end
-#endif
 
-module Buffer
-#if OCAML_VERSION >= (4, 6, 0)
-= Buffer
-#else
-: sig
-  include module type of struct include Buffer end
-
-  val add_utf_8_uchar : t -> Uchar.t -> unit
+module Unix : sig
+  (* `realpath` for OCaml >= 4.13.0,
+     implementation with double chdir otherwise *)
+  val realpath: string -> string
 end
-#endif
 
-module Filename
-#if OCAML_VERSION >= (4, 4, 0)
-= Filename
-#else
-: sig
-  include module type of struct include Filename end
-
-  val extension : string -> string
+module List : sig
+  (** NOTE: OCaml >= 4.12 *)
+  val equal : ('a -> 'a -> bool) -> 'a list -> 'a list -> bool
 end
-#endif
 
-module Result
-#if OCAML_VERSION >= (4, 8, 0)
-= Result
-#else
-: sig
-  type ('a, 'e) t
-#if OCAML_VERSION >= (4, 3, 0)
-    = ('a, 'e) result
-#endif
-    = Ok of 'a | Error of 'e
+module type MAP = sig
+  include Stdlib.Map.S
+
+  (** NOTE: OCaml >= 5.1 *)
+  val add_to_list: key -> 'a -> 'a list t -> 'a list t
 end
-#endif
 
-#if OCAML_VERSION < (4, 7, 0)
-module Stdlib = Pervasives
-#endif
+module Map(Ord : Stdlib.Map.OrderedType) : MAP with type key = Ord.t
+
+module Pair : sig
+  (** NOTE: OCaml >= 5.4 *)
+  val equal :
+    ('a -> 'a -> bool) -> ('b -> 'b -> bool) ->
+    ('a * 'b) -> ('a * 'b) -> bool
+end
+
+module Int : sig
+  (** NOTE: OCaml >= 4.13 *)
+  val min : int -> int -> int
+end
+
+module Sys : sig
+  (* NOTE: OCaml >= 5.4 *)
+  val sigwinch : int
+end

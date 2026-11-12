@@ -11,6 +11,8 @@
 
 type relop = [`Eq|`Neq|`Geq|`Gt|`Leq|`Lt]
 
+let all_relop = [ `Eq ; `Neq ; `Geq ; `Gt ; `Leq ; `Lt ]
+
 let neg_relop = function
   | `Eq -> `Neq
   | `Neq -> `Eq
@@ -33,6 +35,24 @@ let string_of_atom = function
       (string_of_relop r)
       (OpamPackage.Version.to_string c)
 
+(* TODO: upstream to opam-file-format *)
+let compare_relop x y =
+  Stdlib.compare (x : [`Eq|`Neq|`Geq|`Gt|`Leq|`Lt]) (y : relop)
+
+(* TODO: upstream to opam-file-format *)
+let equal_relop x y =
+  compare_relop x y = 0
+
+let compare_version_constraint (relop1, v1) (relop2, v2) =
+  let cmp = compare_relop relop1 relop2 in
+  if cmp <> 0 then cmp
+  else OpamPackage.Version.compare v1 v2
+
+let compare_atom (name1, vc1) (name2, vc2) =
+  let cmp = OpamPackage.Name.compare name1 name2 in
+  if cmp <> 0 then cmp
+  else Option.compare compare_version_constraint vc1 vc2
+
 let short_string_of_atom = function
   | n, None       -> OpamPackage.Name.to_string n
   | n, Some (`Eq,c) ->
@@ -48,7 +68,7 @@ let short_string_of_atom = function
 let string_of_atoms atoms =
   OpamStd.List.concat_map " & " short_string_of_atom atoms
 
-let atom_of_string str =
+let atom_of_string =
   let re = lazy Re.(compile @@ whole_string @@ seq [
       group @@ rep1 @@ diff any (set ">=<.!");
       group @@ alt [ seq [ set "<>"; opt @@ char '=' ];
@@ -56,18 +76,19 @@ let atom_of_string str =
       group @@ rep1 any;
     ])
   in
-  try
-    let sub = Re.exec (Lazy.force re) str in
-    let sname = Re.Group.get sub 1 in
-    let sop = Re.Group.get sub 2 in
-    let sversion = Re.Group.get sub 3 in
-    let name = OpamPackage.Name.of_string sname in
-    let sop = if sop = "." then "=" else sop in
-    let op = OpamLexer.FullPos.relop sop in
-    let version = OpamPackage.Version.of_string sversion in
-    name, Some (op, version)
-  with Not_found | Failure _ | OpamLexer.Error _ ->
-    OpamPackage.Name.of_string str, None
+  fun str ->
+    try
+      let lazy re = re in
+      let sub = Re.exec re str in
+      let sname = Re.Group.get sub 1 in
+      let sop = Re.Group.get sub 2 in
+      let sversion = Re.Group.get sub 3 in
+      let name = OpamPackage.Name.of_string sname in
+      let op = if sop = "." then `Eq else OpamLexer.FullPos.relop sop in
+      let version = OpamPackage.Version.of_string sversion in
+      name, Some (op, version)
+    with Not_found | OpamLexer.Error _ ->
+      OpamPackage.Name.of_string str, None
 
 type 'a conjunction = 'a list
 
@@ -191,6 +212,12 @@ let rec fold_right f i = function
   | And(x,y) -> fold_right f (fold_right f i y) x
   | Or(x,y)  -> fold_right f (fold_right f i y) x
 
+let rec exists f = function
+  | Empty    -> false
+  | Atom x   -> f x
+  | Block x  -> exists f x
+  | And(x,y) | Or(x,y) -> exists f x || exists f y
+
 type version_formula = version_constraint formula
 
 type t = (OpamPackage.Name.t * version_formula) formula
@@ -249,6 +276,8 @@ let compare_nc (n1, c1) (n2, c2) =
 
 let compare = compare_formula compare_nc
 
+let equal f1 f2 = compare f1 f2 = 0
+
 let rec eval atom = function
   | Empty    -> true
   | Atom x   -> atom x
@@ -297,7 +326,7 @@ let packages_of_atoms ?(disj=false) pkgset atoms =
   let ffilter = if disj then List.exists else List.for_all in
   let by_name =
     List.fold_left (fun acc (n,_ as atom) ->
-        OpamPackage.Name.Map.update n (fun a -> atom::a) [] acc)
+        OpamPackage.Name.Map.add_to_list n atom acc)
       OpamPackage.Name.Map.empty atoms
   in
   OpamPackage.Name.Map.fold (fun name atoms acc ->
@@ -377,12 +406,13 @@ let verifies f nv =
       check_version_formula cstr (OpamPackage.version nv))
     name_formula
 
+let all_names f =
+  fold_left (fun acc (name, _) ->
+      OpamPackage.Name.Set.add name acc)
+    OpamPackage.Name.Set.empty f
+
 let packages pkgset f =
-  let names =
-    fold_left (fun acc (name, _) ->
-        OpamPackage.Name.Set.add name acc)
-      OpamPackage.Name.Set.empty f
-  in
+  let names = all_names f in
   (* dnf allows us to transform the formula into a union of intervals, where
      ignoring atoms for different package names works. *)
   let dnf = dnf_of_formula f in
@@ -483,23 +513,25 @@ let rec sort comp f=
 let atoms t =
   fold_right (fun accu x -> x::accu) [] (to_atom_formula t)
 
-let to_cnf t =
-  let atf = to_atom_formula t in
+let formula_to_cnf t =
   let atoms = fold_right (fun acc a -> a::acc) [] in
-  let conj = rev_ands_to_list atf in
+  let conj = rev_ands_to_list t in
   if List.for_all is_disjunction conj then
     List.rev_map atoms conj (* this gives a nice speedup *)
   else
-    List.rev_map atoms @@ rev_ands_to_list @@ cnf_of_formula atf
+    List.rev_map atoms @@ rev_ands_to_list @@ cnf_of_formula t
 
-let to_dnf t =
-  let atf = to_atom_formula t in
+let to_cnf t = formula_to_cnf @@ to_atom_formula t
+
+let formula_to_dnf t =
+  let disj = rev_ors_to_list t in
   let atoms = fold_right (fun acc a -> a::acc) [] in
-  let disj = rev_ors_to_list atf in
   if List.for_all is_conjunction disj then
     List.rev_map atoms disj
   else
-    List.rev_map atoms @@ rev_ors_to_list @@ dnf_of_formula atf
+    List.rev_map atoms @@ rev_ors_to_list @@ dnf_of_formula t
+
+let to_dnf t = formula_to_dnf @@ to_atom_formula t
 
 let to_conjunction t =
   if is_conjunction t then atoms t
@@ -551,7 +583,7 @@ let simplify_ineq_formula vcomp f =
   let val_of_int i = vals_a.(i/2) in
   let int_of_val =
     let m = List.mapi (fun i v -> v, 2 * i + 1) vals in
-    fun v -> List.assoc v m
+    fun v -> OpamStd.List.assoc (fun v v' -> vcomp v v' = 0) v m
   in
   (* One integer for each value appearing in f, plus one for each interval *)
   let rec mk_ranges acc n = if n < 0 then acc else mk_ranges (n::acc) (n-1) in

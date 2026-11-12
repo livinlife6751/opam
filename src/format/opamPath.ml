@@ -17,7 +17,9 @@ type t = dirname
 (* Returns a generic file, coerced by the .mli *)
 let ( /- ) dir f = OpamFile.make (dir // f)
 
-let config t = t /- "config"
+let config t = t /- OpamPathName.config_f
+
+let redirected t = t // "redirected-opamroot"
 
 let init_config_files () =
   List.map OpamFile.make [
@@ -25,25 +27,28 @@ let init_config_files () =
     OpamFilename.Dir.of_string (OpamStd.Sys.home ()) // ".opamrc";
   ]
 
-let state_cache t = t / "repo" // "state.cache"
+let state_cache_dir t = t / OpamPathName.repo_d
 
-let lock t = t // "lock"
+let state_cache t = state_cache_dir t // Printf.sprintf "state-%s.cache" (OpamVersion.magic ())
+
+let lock t = t // OpamPathName.lock_f
 
 let config_lock t = t // "config.lock"
 
+(*
 let archives_dir t = t / "archives"
-
 let archive t nv = archives_dir t // (OpamPackage.to_string nv ^ "+opam.tar.gz")
+*)
 
-let repos_lock t = t / "repo" // "lock"
+let repos_lock t = t / OpamPathName.repo_d // OpamPathName.lock_f
 
-let repos_config t = t / "repo" /- "repos-config"
+let repos_config t = t / OpamPathName.repo_d /- "repos-config"
 
 let init t = t / "opam-init"
 
-let hooks_dir t = init t / "hooks"
+let hooks_dir t = init t / OpamPathName.hooks_d
 
-let log t = t / "log"
+let log t = t / OpamPathName.log_d
 
 let backup_file =
   let file = lazy Unix.(
@@ -59,14 +64,14 @@ let backup t = backup_dir t /- backup_file ()
 
 let plugin_prefix = "opam-"
 
-let plugins t = t / "plugins"
+let plugins t = t / OpamPathName.plugins_d
 
 let plugins_bin t = plugins t / "bin"
 
 let plugin_bin t name =
-  let sname = OpamPackage.Name.to_string name in
+  let sname = OpamPackage.Name.to_string name ^ OpamStd.Sys.executable_name "" in
   let basename =
-    if OpamStd.String.starts_with ~prefix:plugin_prefix sname then sname
+    if OpamCompat.String.starts_with ~prefix:plugin_prefix sname then sname
     else plugin_prefix ^ sname
   in
   plugins_bin t // basename
@@ -75,6 +80,8 @@ let plugin t name =
   let sname = OpamPackage.Name.to_string name in
   assert (sname <> "bin");
   plugins t / sname
+
+let last_env t = t / ".last-env"
 
 module type LAYOUT = sig
   type ctx
@@ -92,38 +99,43 @@ module Switch = struct
 
   let meta t a = root t a / meta_dirname
 
-  let lock t a = meta t a // "lock"
+  let lock t a = meta t a // OpamPathName.lock_f
 
   let backup_dir t a = meta t a / "backup"
 
   let backup t a = backup_dir t a /- backup_file ()
 
-  let selections t a = meta t a /- "switch-state"
+  let selections t a = meta t a /- OpamPathName.switch_state
 
-  let build_dir t a = meta t a / "build"
+  let build_dir t a = meta t a / OpamPathName.build_d
 
   let build t a nv = build_dir t a / OpamPackage.to_string nv
 
-  let remove_dir t a = meta t a / "remove"
+  let remove_dir t a = meta t a / OpamPathName.remove_d
 
   let remove t a nv = remove_dir t a / OpamPackage.to_string nv
 
-  let install_dir t a = meta t a / "install"
+  let install_dir t a = meta t a / OpamPathName.install_d
 
-  let install t a n = install_dir t a /- (OpamPackage.Name.to_string n ^ ".install")
+  let install t a n =
+    install_dir t a
+    /- (OpamPackage.Name.to_string n ^ OpamPathName.install_suffix)
 
-  let changes t a n = install_dir t a /- (OpamPackage.Name.to_string n ^ ".changes")
+  let changes t a n =
+    install_dir t a
+    /- (OpamPackage.Name.to_string n ^ OpamPathName.changes_suffix)
 
-  let reinstall t a = meta t a /- "reinstall"
+  let reinstall t a = meta t a /- OpamPathName.reinstall_d
 
-  let switch_config t a = meta t a /- "switch-config"
+  let switch_config t a = meta t a /- OpamPathName.switch_config
 
-  let config_dir t a = meta t a / "config"
+  let config_dir t a = meta t a / OpamPathName.config_d
 
   let config t a n =
-    config_dir t a /- (OpamPackage.Name.to_string n ^ ".config")
+    config_dir t a
+    /- (OpamPackage.Name.to_string n ^ OpamPathName.config_suffix)
 
-  let sources_dir t a = meta t a / "sources"
+  let sources_dir t a = meta t a / OpamPathName.sources_d
 
   let extra_files_dir t a = meta t a / "extra-files-cache"
 
@@ -131,26 +143,31 @@ module Switch = struct
 
   let sources t a nv = sources_dir t a / OpamPackage.to_string nv
 
-  let pinned_package t a name = sources_dir t a / OpamPackage.Name.to_string name
+  let pinned_package t a name =
+    sources_dir t a / OpamPackage.Name.to_string name
 
-  let env_filename = "environment"
+  let env_filename = OpamPathName.environment_f
 
   let environment t a = meta t a /- env_filename
 
   let env_relative_to_prefix pfx = pfx / meta_dirname /- env_filename
 
-  let installed_opams t a = meta t a / "packages"
+  let nix_env t a = meta t a /- "nix.env"
 
-  let installed_opams_cache t a = meta t a / "packages" // "cache"
+  let installed_opams t a = meta t a / OpamPathName.packages_d
+
+  let installed_opams_cache t a = meta t a / OpamPathName.packages_d // "cache"
 
   let installed_package_dir t a nv =
     installed_opams t a / OpamPackage.to_string nv
 
   let installed_opam t a nv =
-    installed_package_dir t a nv /- "opam"
+    installed_package_dir t a nv /- OpamPathName.opam_f
 
   let installed_opam_files_dir t a nv =
-    installed_package_dir t a nv / "files"
+    installed_package_dir t a nv / OpamPathName.files_d
+
+  let mans = ["1";"1M";"2";"3";"4";"5";"6";"7";"9"]
 
   module DefaultF(L:LAYOUT) = struct
     let lib_dir = L.lib_dir
@@ -167,6 +184,8 @@ module Switch = struct
       match num with
       | None -> L.root t a / "man"
       | Some n -> L.root t a / "man" / ("man" ^ n)
+
+    let man_dirs t a = List.map (fun num -> man_dir ~num t a) mans
 
     let share_dir t a = L.root t a / "share"
 
@@ -223,6 +242,8 @@ module Switch = struct
     | None -> base
     | Some n -> base / ("man" ^ n)
 
+  let man_dirs t a c = List.map (fun num -> man_dir ~num t a c) mans
+
   let share_dir t a c = lookup Share (prefix t a c) "share" c
 
   let share t a c n = share_dir t a c / OpamPackage.Name.to_string n
@@ -249,11 +270,11 @@ module Switch = struct
 
   module Overlay = struct
 
-    let dir t a = meta t a / "overlay"
+    let dir t a = meta t a / OpamPathName.overlay_d
 
     let package t a n = dir t a / OpamPackage.Name.to_string n
 
-    let opam t a n = package t a n /- "opam"
+    let opam t a n = package t a n /- OpamPathName.opam_f
 
     let tmp_opam t a n = package t a n /- "opam_"
 
@@ -261,7 +282,7 @@ module Switch = struct
 
     let descr t a n = package t a n /- "descr"
 
-    let files t a n = package t a n / "files"
+    let files t a n = package t a n / OpamPathName.files_d
 
   end
 end
@@ -269,9 +290,11 @@ end
 module Builddir = struct
 
   let install builddir nv =
-    builddir /- (OpamPackage.Name.to_string nv.name ^ ".install")
+    builddir
+    /- (OpamPackage.Name.to_string nv.name ^ OpamPathName.install_suffix)
 
   let config builddir nv =
-    builddir /- (OpamPackage.Name.to_string nv.name ^ ".config")
+    builddir
+    /- (OpamPackage.Name.to_string nv.name ^ OpamPathName.config_suffix)
 
 end

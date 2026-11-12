@@ -27,7 +27,7 @@ module type ExternalArg = sig
   val default_criteria: criteria_def
 end
 
-let call_external_solver command ~criteria ?timeout (_, universe,_ as cudf) =
+let call_external_solver command ~criteria ?timeout ?tolerance:_ (_, universe,_ as cudf) =
   let solver_in =
     OpamFilename.of_string (OpamSystem.temp_file "solver-in") in
   let solver_out =
@@ -57,7 +57,7 @@ let call_external_solver command ~criteria ?timeout (_, universe,_ as cudf) =
     in
     OpamFilename.remove solver_in;
     if not (OpamFilename.exists solver_out) then
-      raise (Common.CudfSolver.Error "no output")
+      raise (Dose_common.CudfSolver.Error "no output")
     else if
       (let ic = OpamFilename.open_in solver_out in
        try
@@ -65,7 +65,7 @@ let call_external_solver command ~criteria ?timeout (_, universe,_ as cudf) =
          i = "FAIL"
        with End_of_file -> close_in ic; false)
     then
-      raise Common.CudfSolver.Unsat
+      raise Dose_common.CudfSolver.Unsat
     else
     let r =
       Cudf_parser.load_solution_from_file
@@ -85,6 +85,8 @@ module External (E: ExternalArg) : S = struct
   let is_present () = Lazy.force E.is_present
 
   let command_name = Some E.command_name
+
+  let preemptive_check = true
 
   let default_criteria = E.default_criteria
 
@@ -238,7 +240,7 @@ let default_solver_selection =
   ]
 
 let extract_solver_param name =
-  if OpamStd.String.ends_with ~suffix:")" name then
+  if OpamCompat.String.ends_with ~suffix:")" name then
     match OpamStd.String.cut_at name '(' with
     | Some (xname, ext2) ->
       xname, Some (OpamStd.String.remove_suffix ~suffix:")" ext2)

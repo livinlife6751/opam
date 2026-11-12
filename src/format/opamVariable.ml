@@ -18,6 +18,14 @@ type variable_contents =
   | S of string
   | L of string list
 
+let variable_contents_equal vc1 vc2 = match vc1, vc2 with
+  | B b1, B b2 -> Bool.equal b1 b2
+  | S s1, S s2 -> String.equal s1 s2
+  | L l1, L l2 -> OpamCompat.List.equal String.equal l1 l2
+  | B _, _
+  | S _, _
+  | L _, _ -> false
+
 let string_of_variable_contents = function
   | B b -> string_of_bool b
   | S s -> s
@@ -60,7 +68,7 @@ module Full = struct
   (* Read the variables overridden through the environment *)
   let read_from_env v =
     let var_str = to_string (variable v) in
-    let undash = OpamStd.String.map (function '-' -> '_' | c -> c) in
+    let undash = String.map (function '-' -> '_' | c -> c) in
     let var_hook =
       match package v with
       | Some n ->
@@ -107,6 +115,19 @@ module Full = struct
   let of_json = function
     | `String s -> (try Some (of_string s) with _ -> None)
     | _ -> None
+
+  let compare {scope; variable} fv =
+    match scope, fv.scope with
+    | Global, Global | Self, Self ->
+      String.compare variable fv.variable
+    | Package n, Package m ->
+      let package = OpamPackage.Name.compare n m in
+      if package <> 0 then package else
+        String.compare variable fv.variable
+    | Global, _ | _, Self -> 1
+    | Self, _ | _, Global -> -1
+
+  let equal f g = compare f g = 0
 
   module O = struct
     type tmp = t

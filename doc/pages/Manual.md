@@ -52,7 +52,9 @@ following hierarchy:
   they override what may already be present in the `opam` file
 - [`/packages/<pkgname>/<pkgname>.<version>/files/`](#files): contains files
   that are copied over the root of the source tree of the given package before
-  it gets used.
+  it gets used. Before opam 2.3, all files in this directory were copied. 
+  Since opam 2.3 _only_ the files listed in the
+  [`extra-files`](#opamfield-extra-files) field are copied.
 - `/cache/`: cached package files, by checksum. Note that the cache location is
   configured in the [repo](#repofield-archive-mirrors) file, this name is only
   where `opam admin cache` puts it by default.
@@ -161,8 +163,7 @@ Switches are laid out thusly:
 - [`<switch-prefix>/.opam-switch/install/<pkgname>.install`](#lt-pkgname-gt-install):
   `.install` files used to install the given package
 - `<switch-prefix>/.opam-switch/install/<pkgname>.changes`: file system changes
-  done by the installation of the given package, as tracked by <span
-  class="opam">opam</span>
+  done by the installation of the given package, as tracked by <span class="opam">opam</span>
 - `<switch-prefix>/.opam-switch/packages/<pkgname>.<version>/`: metadata of the
   given package as it has been used for its installation
 - `<switch-prefix>/.opam-switch/sources/<pkgname>.<version>/` or `<pkgname>/`:
@@ -178,6 +179,19 @@ Switches are laid out thusly:
   the source.
 - `<switch-prefix>/.opam-switch/backup`: snapshots of previous states of the
   switch, and other backup files.
+
+#### Plugins
+
+Opam has a plugin mechanism. It works via opam packages whose name starts by
+`opam-` and that have the flag [`plugin`](#opamflag-plugin). They are
+installed in the current switch but can be used accross switches via
+their dedicated `opam insert-plugin-name-here` subcommand.
+
+Internally, when opam doesn't know a subcommand name (e.g. `opam plugin-name`),
+it looks at the binaries located in `${OPAMROOT}/plugins/bin`
+(by default: `~/.opam/plugins/bin`). Everytime a plugin package is installed,
+its `opam-insert-plugin-name-here` binary gets symlinked in that directory.
+If no binaries with a matching name are found, a warning will be shown.
 
 #### Pinning
 
@@ -248,7 +262,7 @@ and _options_:
 <section>       ::= <ident> [ <string> ] "{" <file-contents> "}"
 <ident>         ::= { <identchar> }* <letter> { <identchar> }*
 <varident>      ::= [ ( <ident> | "_" ) { "+" ( <ident> | "_" ) }* : ] <ident>
-<identchar>     ::= <letter> | <digit>  | "_" | "-"
+<identchar>     ::= <letter> | <digit>  | "_" | "-" | "+"
 <letter>        ::= "a".."z" | "A".."Z"
 <digit>         ::= "0".."9"
 <value>         ::= <bool> | <int> | <string> | <ident> | <varident> | <operator> | <list> | <option> | "(" <value> ")"
@@ -298,7 +312,7 @@ packages.
                     | "(" <version-formula> ")"
                     | <relop> <version>
 <relop>           ::= "=" | "!=" | "<" | "<=" | ">" | ">="
-<version>         ::= (") { <identchar> | "+" | "." | "~" }+ (")
+<version>         ::= (") { <identchar> | "." | "~" }+ (")
 ```
 
 Package names have the same restrictions as idents — only letter, digits, dash
@@ -321,12 +335,20 @@ relational operators are `=`, `!=`, `<`, `<=`, `>` and `>=`, and their meaning
 is defined by Version Ordering. They always have higher priority than logical
 operators.
 
+Here is a full example:
+
+```
+"foo" { >= "3.12" } & ("bar" | "baz" { !(> "2" & < "3.5") & != "5.1" })
+```
+
+#### Version-ordering
+
 > <a id="version-ordering">**Version Ordering**</a> follows the basics of the
-> [Debian definition](https://www.debian.org/doc/debian-policy/ch-controlfields.html#s-f-Version).
+> [Debian definition](https://www.debian.org/doc/debian-policy/ch-controlfields.html#s-f-version).
 >
 > It is basically "lexicographical order, with numbers handled
 > properly". In more detail (see the [Debian
-> page](https://www.debian.org/doc/debian-policy/ch-controlfields.html#s-f-Version)
+> page](https://www.debian.org/doc/debian-policy/ch-controlfields.html#s-f-version)
 > for full details):
 >
 > - Version strings are sliced into alternate, possibly empty non-digit / digit
@@ -341,7 +363,7 @@ operators.
 >   1, which is the empty string `""`, is smaller than `"a"`.
 >
 > - For non-digit components, the ordering used is that letters are
->   always smaller than non-letters (for example `z` < `"#"`), while
+>   always smaller than non-letters (for example `z` < `"+"`), while
 >   non-letters are compared by ASCII order.
 >
 > - The `~` character is special as it sorts even before the end of sequence
@@ -352,11 +374,26 @@ operators.
 > Here is an example of an ordered sequence: `~~`, `~`, `~beta2`, `~beta10`,
 > `0.1`, `1.0~beta`, `1.0`, `1.0-test`, `1.0.1`, `1.0.10`, `dev`, `trunk`.
 
-Here is a full example:
+For quick sanity checks, you can compare package versions using the `opam`
+command line (available from opam version `2.4.0`):
 
+```shell
+$ opam admin compare-versions 1.2.10 1.2.9
+1.2.10 > 1.2.9
 ```
-"foo" { >= "3.12" } & ("bar" | "baz" { !(> "2" & < "3.5") & != "5.1" })
+
+Note that this command also supports flags to check the result of the comparison
+against a specified expectation. For example:
+
+```shell
+$ opam admin compare-versions 0.0.9 --lt 0.0.10
+[0]
 ```
+
+Refer to the command help page for more details.
+
+You can also use the [OpamVersionCompare](/doc/api/opam-core/OpamVersionCompare) API
+for opam < `2.4.0` users.
 
 ### Variables
 
@@ -384,7 +421,14 @@ insert different strings depending on the boolean value of a variable.
 Additionally, boolean package variables may be combined using the following
 form: `name1+name2+name3:var` is the conjunction of `var` for each of `name1`,
 `name2` and `name3`, _i.e_ it is equivalent to `name1:var & name2:var &
-name3:var`
+name3:var`.
+
+**Warning**: if the package name contains a `+` character (e.g. `conf-g++`),
+their variables may only be accessed using opam 2.2 via string interpolation,
+with the following syntax:
+```
+"%{?conf-g++:your-variable:}%"
+```
 
 #### Scopes
 
@@ -408,11 +452,12 @@ three scopes:
      within `foo`'s definition, `foo:bar`, which can in this case be abridged in
      `_:bar`, always refers to the version being defined.
 
-3. Some fields define their own local variables, like `success` in the field
+3. Some fields define their own local variables, like `success` and
+   [`with-dev-setup`](#pkgvar-with-dev-setup) (since opam 2.2) in the field
    [`post-messages`](#opamfield-post-messages). Other examples of this include
-   the [`with-test`](#pkgvar-with-test) and [`with-doc`](#pkgvar-with-doc)
-   variables, available in the `depends:`, `depopts:`, `build:`, `install:` and
-   `remove:` fields.
+   the [`with-test`](#pkgvar-with-test), [`with-doc`](#pkgvar-with-doc) and
+   [`with-dev-setup`](#pkgvar-with-dev-setup) (since opam 2.2) variables, available in the
+   `depends:`, `depopts:`, `build:`, `install:` and `remove:` fields.
 
     Within package definition files, the variables `name` and `version`, as
     shortcuts to `_:name` and `_:version`, corresponding to the package being
@@ -492,9 +537,11 @@ the package being defined.
   resolved direct dependencies of the package
 - <a id="pkgvar-installed">`installed`</a>:
   whether the package is installed
-- <a id="pkgvar-enable">`enable`</a>:
-  takes the value "enable" or "disable" depending on whether the package is
-  installed
+- <a id="pkgvar-enable">`enable`</a>: is not a variable.
+  It takes the value "enable" or "disable" depending on whether the package is
+  installed. Used with the combination operator `+`, 
+  `name1+name2+name3:enable` is syntactic sugar for
+  `name1+name2+name3:installed?enable:disable`.
 - <a id="pkgvar-pinned">`pinned`</a>: whether the package is pinned
 - <a id="pkgvar-dirs">`bin`, `sbin`, `lib`, `man`, `doc`, `share`, `etc`</a>:
   the corresponding directories for this package (similar to
@@ -508,8 +555,10 @@ the package being defined.
   a hash identifying the precise package version and metadata, and that of all
   its dependencies
 - <a id="pkgvar-opamfile">`opamfile`</a>:
-  if the package is installed, path of its opam file, from opam internals,
-  otherwise not defined
+  if the package is installed or pinned it is the path to the internally
+  stored opam file, otherwise, if the package exists, it is the path to
+  a newly created opam file in a directory under the system temporary
+  directory (see `Stdlib.Filename.get_temp_dir_name`)
 
 Extra variables can be defined by any package at installation time, using a
 [`<pkgname>.config`](#lt-pkgname-gt-config) file with a
@@ -521,6 +570,9 @@ Additionally, the following are limited to some package fields (`depends:`,
 - <a id="pkgvar-with-test">`with-test`</a>: only true if tests have been
   enabled for this specific package
 - <a id="pkgvar-with-doc">`with-doc`</a>: similarly for documentation
+- <a id="pkgvar-with-dev-setup">`with-dev-setup`</a> (since opam 2.2):
+  similarly for developer tools
+
 
 The following are only available in the `depends:` and `depopts:` fields, and
 are used as dependency flags (they don't have a defined `true` or `false` value
@@ -568,8 +620,9 @@ The following are allowed in filters:
 - Idents
 - Parentheses
 - Logical operators (binary AND `&`, binary OR `|`, prefix, unary NOT `!`)
-- The unary operator `?` for detecting whether an expression contains undefined
-  variables
+- The unary operator `?` for detecting whether a value is defined. `?expr`
+  evaluates to `true` if `expr` evaluates to a defined value, and `false` if it
+  evaluates to an undefined value.
 - Binary relational operators (`=`, `!=`, `<`, `<=`, `>`, `>=`)
 
 The comparisons are done using [Version Order](#version-ordering), including for
@@ -635,14 +688,70 @@ Some fields define updates to environment variables in the form:
 
 The allowed update operators `update-op` denote how the string is applied to the
 environment variable. Prepend and append operators assume list of elements
-separated by an OS-specific character (`;` on Windows, `:` on Cygwin or any
-other system).
+separated by an OS-specific character.
 - `=` override (or set if undefined)
 - `+=` or `:=` prepend. They differ when the variable is unset of empty, where `:=` adds a trailing separator.
 - `=+` or `=:` append. They differ when the variable is unset of empty, where `=:` adds a leading separator.
 - `=+=` is similar to `+=`, except that when the variable was previously altered
   by opam, the new value will replace the old one at the same position instead
   of being put in front.
+
+`FOO = ""` causes `FOO` to be set _but empty_ on Unix but _unset_ on Windows.
+
+`FOO += ""`, `FOO := ""`, etc. are all ignored - i.e. opam never adds empty segments to an existing variable.
+
+#### Environment update portability
+<a id="env-update-rewrite"></a>
+
+Some fields define an environment update portability specification. In the opam
+file it is the [`x-env-path-rewrite:`](#opamfield-x-env-path-rewrite) field, of the
+form:
+
+```BNF
+<environment-rewrites> ::= { <environment-rewrite> }*
+<environment-rewrite>  ::= <ident> <bool>
+                         | <ident> <separator-formula> <path-format-formula>
+
+<separator-formula>    ::= <separator-formula> "|" <separator-formula>
+                         | ( <separator-formula> )
+                         | <separator> { { <distrib-formula> }* }
+<path-format-formula>  ::= <path-format-formula> "|" <path-format-formula>
+                         | ( <path-format-formula> )
+                         | <path-format> { { <distrib-formula> }* }
+
+<separator>            ::= (") ":" (") | (") ";" (")
+<path-format>          ::= (") "host" (") | (") "host-quoted" (") | (") "target" (") | (") "target-quoted" (")
+
+<distrib-formula>      ::= <distrib-formula> <logop> <distrib-formula>
+                         | "!" <distrib-formula>
+                         | "(" <distrib-formula> ")"
+<logop>                ::= "&" | "|"
+```
+
+The `<separator>` defines the path separator to use for the variable.
+The `<path-format>` defines the way to handle variables path formatting:
+- host: use the *host* interpretation of PATHs (i.e. convert via `cygpath` on
+  Windows).
+- host-quoted: use the *host* interpretation of entries and double-quote any
+  entries which include the separator character.
+- target: use the *target* interpretation of entries (i.e. rewrite slashes to
+  backslashes on Windows).
+- target-quoted: use the *target* interpretation of entries and double-quote
+  any entries which include the separator character.
+
+If a variable is not mentioned in `x-env-path-rewrite`, the separator is assumed to be `;` on Windows and `:` on all other systems; no slash or quoting transformations are performed. There are two special default cases:
+* `MANPATH` uses `:` separator and is `host`
+* `PATH` on Windows uses `;` separator and is `target-quoted`
+
+For example, on Windows:
+- `[FOO false]`: `FOO` won't be translated nor rewritten, and default separator is used if needed.
+- `[FOO true]`: `FOO` is rewritten using defaults `;` and `target` with slash rewriting. E.g.,
+  - `FOO = "a:/path/to"` -> `FOO=a:\path\to`
+- `[FOO ":" "target-quoted"]`: `FOO` will be appended using `:` separator, if the added path contains `/` they are transformed into `\\`, and if the added path contains a `:`, the added path will be quoted. E.g.,:
+  - `FOO += "a/path/to"` -> `FOO=a\path\to:R:\previous\path`
+  - `FOO += "a:path/to"` -> `FOO="a:path\to":R:\previous\path`
+- `[FOO ":" "host"]`: `FOO` will be appended using `:`, and its path will be translated according to the host translator, i.e. `cygpath <path>`. E.g.,
+  - `FOO += "A:\path\to"` -> `FOO=/cygdrive/a/path/to:/previous/path`
 
 ### URLs
 
@@ -652,7 +761,8 @@ URLs are provided as strings. They can refer to:
 - URLs of the form `http://`, `https://`, `ftp://`, `ssh://`, `file://`, `rsync://`
 - Version control URLs for git, mercurial and darcs: `git://`, `hg://`,
   `darcs://`. This assumes http transport for `hg` and `darcs`, _i.e._
-  `hg://` is short for `hg+http://`
+  `hg://` is short for `hg+http://`.
+  - See the [FAQ](FAQ.html) for Git or GitHub specific notes
 - Version control bound to a specific URL: `<vc>+<scheme>://`, e.g. `git://`,
   `hg+https://`, `git+file://`, etc. (**NOTE:** this has been added in opam 1.2.1)
 
@@ -678,8 +788,8 @@ Additionally, the number of hexadecimal chars must match exactly what is
 expected by the corresponding algorithm (resp. 32, 64 and 128 for MD5, SHA256
 and SHA512).
 
-If `openssl` is installed on the system, it will be used for faster computation
-of SHA hashes.
+Until opam 2.2.0, if `openssl` was installed on the system, it would be used for
+faster computation of SHA hashes.
 
 ## Specific file formats
 
@@ -717,6 +827,13 @@ some specifics of the repository. It has the following optional fields:
 * <a id="repofield-announce">`announce: [ <string> { <filter> } ... ]`</a>:
   Messages that will be printed to the user on initialisation or update of this
   repository, with optional conditions.
+* <a id="repofield-stamp">`stamp: <string>`</a>:
+  A string referring to the commit hash or timestamp of the current state of
+  the repository. For example if the repository source originally comes from
+  a git repository but is distributed through a http endpoint, that http
+  server could distribute a `repo` file, whose `stamp` field could refer
+  to the commit hash linked to the current state of the repository delivered
+  in tar.gz format.
 
 #### opamrc
 
@@ -803,8 +920,9 @@ files.
   a list of strings listing the original authors of the software.
 
 - <a id="opamfield-license">`license: [ <string> ... ]`</a>:
-  The SPDX ID of the license(s) under which the source software is available
-  (see http://spdx.org/licenses/).
+  The SPDX expression of the license(s) under which the source software is available
+  (see http://spdx.org/licenses/). The [SPDX standard](https://spdx.github.io/spdx-spec/latest/SPDX-license-expressions/) allows to define custom licenses if necessary using the `LicenseRef-your-custom-name` syntax (e.g. `license: "LicenseRef-My-Custom-Non-Commercial-License"`).
+  When several licenses are defined, the combination of them is equivalent to a single license expression separated by `AND`. For instance: `license: ["MIT" "ISC"]` is equivalent to `license: "MIT AND ISC"`. 
 
 - <a id="opamfield-homepage">`homepage: [ <string> ... ]`</a>,
   <a id="opamfield-doc">`doc: [ <string> ... ]`</a>,
@@ -854,11 +972,12 @@ files.
     expected to be produced within the source directory subtree, _i.e._ below
     the command's `$PWD`, during this step.
 
-    The [`with-test`](#pkgvar-with-test) and [`with-doc`](#pkgvar-with-doc)
-    variables are available in the scope of this field: filter testing commands
-    with _e.g._ `[make "test"] {with-test}`. The `dev` variable can also be
-    useful here to detect that the package is not installed from a release
-    tarball, and may need additional preprocessing (_e.g._ `automake`).
+    The [`with-test`](#pkgvar-with-test), [`with-doc`](#pkgvar-with-doc), and
+    [`with-dev-setup`](#pkgvar-with-dev-setup) (since opam 2.2) variables are available in the
+    scope of this field: filter testing commands with _e.g._ `[make "test"]
+    {with-test}`. The `dev` variable can also be useful here to detect that the
+    package is not installed from a release tarball, and may need additional
+    preprocessing (_e.g._ `automake`).
 
     If a term is undefined (_e.g._ an undefined variable), the empty string is
     used as positional argument.
@@ -876,15 +995,15 @@ files.
     itself.
 
     This field contains typically just `[make "install"]`. If a
-    `package-name.install` is found at the source of the build directory, <span
-    class="opam">opam</span> will install files from there to the prefix
+    `package-name.install` is found at the source of the build directory, <span class="opam">opam</span>
+    will install files from there to the prefix
     according to its instructions after calling the commands specified in the
     `install:` field have been run, if any.
 
-    Variables [`with-test`](#pkgvar-with-test) and
-    [`with-doc`](#pkgvar-with-doc) are also available to the filters used in
-    this field, to run specific installation commands when tests or
-    documentation have been requested.
+    Variables [`with-test`](#pkgvar-with-test), [`with-doc`](#pkgvar-with-doc),
+    and [`with-dev-setup`](#pkgvar-with-dev-setup) (since opam 2.2) are also available to the
+    filters used in this field, to run specific installation commands when
+    tests or documentation have been requested.
 
 - <a id="opamfield-build-doc">
   `build-doc: [ [ <term> { <filter> } ... ] { <filter> } ... ]`</a>,
@@ -925,8 +1044,9 @@ files.
     The filtered package formula can access the global and switch variables, but
     not variables from other packages. Additionally, special boolean variables
     [`build`](#pkgvar-build), [`post`](#pkgvar-post),
-    [`with-test`](#pkgvar-with-test) and [`with-doc`](#pkgvar-with-doc) are
-    defined to allow limiting the scope of the dependency.
+    [`with-test`](#pkgvar-with-test), [`with-doc`](#pkgvar-with-doc), and
+    [`with-dev-setup`](#pkgvar-with-dev-setup) (since opam 2.2) are defined to allow limiting
+    the scope of the dependency.
 
     * `build` dependencies are no longer needed at run-time: they won't trigger
       recompilations of your package.
@@ -939,6 +1059,8 @@ files.
       package is explicitly installed with `--with-test`)
     * likewise, `with-doc` dependencies are only required when building the
       package documentation
+    * likewise, `with-dev-setup` (since opam 2.2) dependencies are only required for a developer
+      tool
 
 - <a id="opamfield-depopts">
   `depopts: [ <pkgname> { <filtered-package-formula> } ... ]`</a>:
@@ -953,7 +1075,7 @@ files.
     [`depends:`](#opamfield-depends), with the same specific variables
     available (except for `post`, which wouldn't make sense).
 
-    Note that `depopts: [ "foo" { = "3" } ]` means that the optional dependency
+    **Note:** `depopts: [ "foo" { = "3" } ]` means that the optional dependency
     only applies for `foo` version `3`, not that your package can't be installed
     with other versions of `foo`: for that, use the
     [`conflicts:`](#opamfield-conflicts) field.
@@ -962,9 +1084,10 @@ files.
   `conflicts: [ <filtered-package-formula> ... ]`</a>:
   a list of package names with optional version constraints indicating that the
   current package can't coexist with those. Conflicts are only allowed on a
-  disjunction of packages: the `&` connector is disallowed between packages or
-  package versions. For example, you can conflict with `"foo" {>= "3"} | "bar"`,
-  but not with `"foo" {>= "3"} & "bar"` or even `"foo" {>= "3" & < "4"}`.
+  disjunction of packages: the `&` connector is disallowed between packages.
+  For example, you can conflict with `"foo" {>= "3"} | "bar"`, but not with
+  `"foo" {>= "3"} & "bar"`. Conjunctions in filters however,
+  are allowed (e.g. `"foo" {>= "3" & < "4"}`)
 
 - <a id="opamfield-conflict-class">`conflict-class: [ <pkgname> ... ]`</a>:
   an alternate, symmetric way of defining package conflicts. Conflict classes
@@ -973,14 +1096,18 @@ files.
   considered incompatible. This is useful to define sets of mutually conflicting
   packages.
 
-- <a id="opamfield-depexts">
-  `depexts: [ [ <string> ... ] { <filter> }  ... ]`</a>:
-  the package external dependencies. This field may be used to describe the
-  dependencies of the package toward software or packages external to the <span
-  class="opam">opam</span> ecosystem, for various systems. Each
-  `[ <string> ... ] { <filter> }` element declares the strings to the left as
-  identifiers to required system-managed packages, while the filter to the right
-  allows one to select the systems they will be active on.
+- <a id="opamfield-depexts"> `depexts: [ [ <string> ... ] { <filter> } ... ]`</a>:
+  the package external dependencies. This field is used to describe the
+  dependencies of the package toward packages external to the <span class="opam">opam</span>
+  ecosystem; <span class="opam">opam</span> will then
+  use its knowledge of the system package manager to determine the availability
+  of the package, and install these external dependencies on the system as
+  prerequisites of the package, asking the user for administrator rights if
+  required.
+
+    Each `[ <string> ... ] { <filter> }` element declares the strings to the
+    left as identifiers to required system-managed packages, while the filter to
+    the right allows one to select the systems they will be active on.
 
     The filters typically use variables [`arch`](#opamvar-arch),
     [`os`](#opamvar-os), [`os-distribution`](#opamvar-os-distribution),
@@ -1007,7 +1134,9 @@ files.
   The special boolean variable `failure` is defined in the scope of the filter,
   and can be used to print messages in case there was an error (typically, a
   hint on how it can be resolved, or a link to an open issue). `success` is also
-  defined as syntactic sugar for `!failure`.
+  defined as syntactic sugar for `!failure`. The
+  [`with-dev-setup`](#pkgvar-with-dev-setup) (since opam 2.2) variable is also available in the
+  scope of this field.
 
 - <a id="opamfield-available">`available: [ <filter> ]`</a>:
   can be used to add constraints on the OS and other global variables.
@@ -1042,6 +1171,21 @@ files.
       fail to install if they don't pass. `conf` packages should have a name
       starting with `conf-`, and include the appropriate
       [`depexts:`](#opamfield-depexts) field.
+    - <a id="opamflag-avoid-version">`avoid-version`</a>: this gives the package
+      version lowest priority when computing the solution to user requests. The
+      priority is not only related to other versions of the same package: if all
+      of a package's versions are marked with `avoid-version`, the package will
+      only get installed if there are no alternatives, or if asked for
+      explicitely. This can be affected by the
+      [solver criteria](#configfield-solver-criteria). This can be useful for
+      beta releases, or to discourage installation of releases with known bugs.
+      Note that this behaviour is disabled when a flagged version of the package
+      is already installed. This was introduced in opam 2.1.
+    - <a id="opamflag-deprecated">`deprecated`</a>: this flag is equivalent to
+      [`avoid-version`](#opamflag-avoid-version) except for the addition of a
+      deprecation message after the package is installed as well as marked as
+      deprecated in the solution shown to the user upon installation. This was
+      introduced in opam 2.2.
 
 - <a id="opamfield-features">
   `features: [ <ident> { <pkgname> { <filtered-package-formula> } ... } { <string> } ... ]`
@@ -1060,10 +1204,11 @@ files.
   defines a long description (one or more paragraphs) for the package. This can
   also be defined as the body of an external [`descr`](#descr) file.
 
-- <a id="opamsection-url">`url "{" <url-file> "}"`</a>:
-  defines the URL where the package source can be obtained. This section has
-  contents in the same format as the [`url`](#url) file, and has the same effect
-  as using a separate `url` file.
+- <a id="opamsection-url">`url "{" <url-section> "}"`</a>:
+  defines the URL where the package source can be obtained. Before opam 2.6,
+  this section' content was the same format as the [`url`](#url) file,
+  and had the same effect as using a separate `url` file.
+  As of opam 2.6, the `url` file now only supports the legacy opam 1.2 fields.
 
 - <a id="opamfield-setenv">`setenv: [ <environment-update> ... ]`</a>: defines
   environment variables updates that will be applied upon installing the
@@ -1080,15 +1225,25 @@ files.
   build, install and remove scripts.
 
     The following environment variables are set by opam (but can be overridden by `build-env`):
-    - `CDPATH=`
-    - `MAKEFLAGS=`
-    - `MAKELEVEL=`
-    - `OPAM_PACKAGE_NAME=<pkg>` (`<pkg>` is the name of the package being built/installed/removed)
-    - `OPAM_PACKAGE_VERSION=<ver>` (`<ver>` is the version of the package being built/installed/removed)
-    - `OPAMCLI=2.0` (since opam 2.1)
+    - can be overridden by `build-env`:
+      - `CDPATH=`
+      - `MAKEFLAGS=`
+      - `MAKELEVEL=`
+      - `OPAM_PACKAGE_NAME=<pkg>` (`<pkg>` is the name of the package being built/installed/removed)
+      - `OPAM_PACKAGE_VERSION=<ver>` (`<ver>` is the version of the package being built/installed/removed)
+      - `OPAMCLI=2.0` (since opam 2.1)
+    - non overwritable:
+      - `OPAMROOT`=<opam root path>`
+      - `OPAMSWITCH=<switch name>`
+      - `OPAM_SWITCH_PREFIX=<switch prefix>`
+    - `PATH` is updated with the current switch binary directory
     - `TMP` and `TMPDIR` are set by the sandbox script (bubblewrap), but should not be relied on since the sandbox is not used on all platforms and can be disabled by the user.
+    - `CYGWIN=winsymlinks:native` on Windows, or `CYGWIN=$CYGWIN winsymlinks:native` if `CYGWIN` is defined and not empty and `CYGWIN` does not contain either `winsymlinks:native` or `winsymlinks:nativestrict` already (since opam 2.2). In some cases `noglob` can also be added to this variable, such that the default value becomes `CYGWIN=winsymlinks:native noglob` (since opam 2.1)
 
-- <a id="opamsection-extra-sources">`extra-source <string> "{" <url-file> "}"`</a>:
+  See [`x-env-path-rewrite:`](#opamfield-x-env-path-rewrite)
+  for path portability of environment variables on Windows.
+
+- <a id="opamsection-extra-sources">`extra-source <string> "{" <url-section> "}"`</a>:
   allows the definition of extra files that need downloading into the source
   tree before the package can be patched (if necessary) and built. The format is
   similar to that of the `url` section, but here it is expected to point to a
@@ -1096,9 +1251,14 @@ files.
   `<string>` indicates the name the file should be saved to, and is relative to
   the root of the source tree.
 
+  See [`x-env-path-rewrite:`](#opamfield-x-env-path-rewrite)
+  for path portability of environment variables on Windows.
+
 - <a id="opamfield-extra-files">`extra-files: [ [ <string> <checksum> ] ... ]`</a>:
-  optionally lists the files below `files/` with their checksums. Used
-  internally for integrity verifications.
+  lists the files below `files/` with their checksums. Used
+  internally for integrity verification. Before opam 2.3, listing files in
+  this field was optional, but since opam 2.3 all files must be listed in
+  this field or they will not be copied from the `files/` directory.
 
 - <a id="opamfield-pin-depends">`pin-depends: [ [ <package> <URL> ] ... ]`</a>:
   this field has no effect on the package repository, but is useful for
@@ -1115,6 +1275,11 @@ files.
        pin` or `opam install|upgrade DIR` again to get the new pins if the field
        has changed. Even then, this won't unpin any packages that would have
        been removed from `pin-depends:`.
+
+- <a id="opamfield-x-env-path-rewrite">`x-env-path-rewrite: [ <environment-update-rewrite> ... ]`</a>:
+  a specific extra field, used to specify rewrite rules for environment variables
+  defined in [`setenv:`](#opamfield-setenv) and [`build-env`](#opamfield-build-env).
+  See [`environment update portability`](#env-update-rewrite) for syntax.
 
 - <a id="opamfield-extra-fields">`x-*: <value>`</a>:
   extra fields prefixed with `x-` can be defined for use by external tools. opam
@@ -1170,7 +1335,10 @@ will be copied over the root of the package source. If already present, files
 are overwritten, and directories are recursively merged. [`opam`](#opam) file
 fields like [`patches:`](#opamfield-patches) refer to files at that same root,
 so patches specific to opam are typically included in
-this subdirectory.
+this subdirectory. Since opam 2.3, files must be listed in the
+[`extra-files:`](#opamfield-extra-files) or they are ignored. Before
+opam 2.3, all files were copied regardless of whether they appeared
+in the `extra-files` list.
 
 Also see the [`extra-sources:`](#opamsection-extra-sources) opam section, which has
 a similar behaviour and is processed before the `files/` are copied.
@@ -1213,8 +1381,7 @@ allowed.
   installs to `<prefix>/lib/<pkgname>/`, but the `exec` bit is set (since
   opam 1.2.1)
 - <a id="installfield-libexec_root">`libexec_root:`</a>
-  installs to `<prefix>/lib/`, with the `exec` bit set (since <span
-  class="opam">opam</span> 2.0.0)
+  installs to `<prefix>/lib/`, with the `exec` bit set (since <span class="opam">opam</span> 2.0.0)
 - <a id="installfield-bin">`bin:`</a>
   installs to `<prefix>/bin/`, with the `exec` bit set
 - <a id="installfield-sbin">`sbin:`</a>
@@ -1231,6 +1398,11 @@ allowed.
   installs to `<prefix>/doc/<pkgname>/`
 - <a id="installfield-stublibs">`stublibs:`</a>
   installs to `<prefix>/lib/stublibs/`, with the `exec` bit set
+- <a id="installfield-root">`root:`</a>
+  installs to `<prefix>/` (since opam 2.6.0)
+- <a id="installfield-rootexec">`rootexec:`</a>
+  installs to `<prefix>/`, but the `exec` bit is set (since
+  opam 2.6.0)
 
 The following are treated slightly differently:
 
@@ -1475,6 +1647,11 @@ them modified with [`opam option --global`](man/opam-option.html).
 - <a id="configfield-depext-bypass">`depext-bypass: [ <string> ... ] `</a>:
   assume the listed system packages to be already installed, bypassing the
   checks normally done when `depext` is enabled.
+
+- <a id="configfield-swh-fallback">`swh-fallback: <bool>`</a>:
+  If `true`, opam try to retrieve a unreachable package source from [Software
+  Heritage](www.softwareheritage.org) archive if the `swhid` is present in the
+  opam file.
 
 #### switch-config
 

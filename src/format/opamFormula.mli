@@ -15,11 +15,25 @@
 (** binary operations (compatible with the Dose type for Cudf operators!) *)
 type relop = OpamParserTypes.FullPos.relop_kind (* = [ `Eq | `Neq | `Geq | `Gt | `Leq | `Lt ] *)
 
+val compare_relop : relop -> relop -> int
+val equal_relop : relop -> relop -> bool
+
+(** A list containing each available operator once. *)
+val all_relop : relop list
+
+(** Returns a string representing the operator in infix syntax, as
+    used in opam files (">", "=", etc.) *)
+val string_of_relop : relop -> string
+
 (** Version constraints for OPAM *)
 type version_constraint = relop * OpamPackage.Version.t
 
+val compare_version_constraint : version_constraint -> version_constraint -> int
+
 (** Formula atoms for OPAM *)
 type atom = OpamPackage.Name.t * version_constraint option
+
+val compare_atom : atom -> atom -> int
 
 (** Pretty-printing of atoms *)
 val string_of_atom: atom -> string
@@ -29,7 +43,7 @@ val string_of_atom: atom -> string
 val short_string_of_atom: atom -> string
 
 (** Parses a package or atom, in a format similar to [short_string_of_atom].
-    @raise [Failure] if the format is incorrect *)
+    @raise Failure if the format is incorrect *)
 val atom_of_string: string -> atom
 
 (** Prints atoms as a conjunction ("&") using the short format *)
@@ -135,6 +149,10 @@ val fold_left: ('a -> 'b -> 'a) -> 'a -> 'b formula -> 'a
 (** Fold function (bottom-up, right-to-left) *)
 val fold_right: ('a -> 'b -> 'a) -> 'a -> 'b formula -> 'a
 
+(** [exists f formula] scans the whole [formula] until [f atom] returns [true],
+    in which case it returns [true]. Returns [false] otherwise *)
+val exists: ('a -> bool) -> 'a formula -> bool
+
 (** Sort formula, using [compare] function. `Block` around `Or` and `And` \
     are removed. *)
 val sort: ('a -> 'a -> int) -> 'a formula -> 'a formula
@@ -152,6 +170,7 @@ val check_version_formula: version_formula -> OpamPackage.Version.t -> bool
 type t = (OpamPackage.Name.t * version_formula) formula
 
 val compare: t -> t -> int
+val equal: t -> t -> bool
 
 (** Returns [true] if [package] verifies [formula] (i.e. it is within at least
     one package set that is a solution of the formula, and is named in the
@@ -160,6 +179,9 @@ val verifies: t -> OpamPackage.t -> bool
 
 (** Checks if a given set of (installed) packages satisfies a formula *)
 val satisfies_depends: OpamPackage.Set.t -> t -> bool
+
+(** Returns the set of names referred to in a formula *)
+val all_names: (OpamPackage.Name.t * 'a) formula -> OpamPackage.Name.Set.t
 
 (** Returns the subset of packages possibly matching the formula (i.e. including
     all disjunction cases) *)
@@ -173,8 +195,14 @@ val compare_nc:
 (** Convert a formula to CNF *)
 val cnf_of_formula: 'a formula -> 'a formula
 
+(** Convert a formula to CNF, but as a nested list *)
+val formula_to_cnf: 'a formula -> 'a cnf
+
 (** Convert a formula to DNF *)
 val dnf_of_formula: 'a formula -> 'a formula
+
+(** Convert a formula to DNF, but as a nested list *)
+val formula_to_dnf: 'a formula -> 'a dnf
 
 (** Transform a formula where versions can be expressed using formulas
     to a flat atom formula *)
@@ -223,7 +251,7 @@ val of_conjunction: atom conjunction -> t
     is not a disjunction, then fail. *)
 val to_disjunction: t -> atom disjunction
 
-(** Like [to_disjunction], but accepts conjunctions within constraint formulas,
+(** Like {!to_disjunction}, but accepts conjunctions within constraint formulas,
     resolving them using the provided package set. Conjunctions between packages
     still raise [Failure]. *)
 val set_to_disjunction: OpamPackage.Set.t -> t -> atom disjunction

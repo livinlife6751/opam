@@ -9,7 +9,7 @@
 (**************************************************************************)
 
 open OpamTypes
-open Cmdliner
+open OpamCmdliner
 
 type options = {
   file: OpamFile.Dot_install.t OpamFile.t;
@@ -25,7 +25,6 @@ type options = {
 
 (* A wrapper on top of commands to either proceed, or output a script *)
 type commands = {
-  mkdir: OpamFilename.Dir.t -> unit;
   rmdir: opt:bool -> OpamFilename.Dir.t -> unit;
   cp: ?exec:bool -> opt:bool -> src:OpamFilename.t -> dst:OpamFilename.t -> unit -> unit;
   rm: opt:bool -> OpamFilename.t -> unit;
@@ -105,13 +104,13 @@ let do_commands project_root =
   let confirm s f =
     if OpamConsole.confirm "%s" s then f ()
   in
-  { mkdir; rmdir; cp; rm; confirm }
+  { rmdir; cp; rm; confirm }
 
 let script_commands project_root ochan =
   let made_dirs = ref [] in
   Printf.fprintf ochan "#!/bin/sh\n";
   let mkdir d =
-    if not (List.mem d !made_dirs) then (
+    if not (OpamStd.List.mem OpamFilename.Dir.equal d !made_dirs) then (
       Printf.fprintf ochan "mkdir -p %S\n" (OpamFilename.Dir.to_string d);
       made_dirs := d :: !made_dirs
     ) in
@@ -150,7 +149,7 @@ let script_commands project_root ochan =
     f ();
     Printf.fprintf ochan "fi\n";
   in
-  { mkdir; rmdir; cp; rm; confirm }
+  { rmdir; cp; rm; confirm }
 
 (* [f (dest, file_list, is_exec)] should take care of the processing,
    where [dest src dst] returns the destination of a file with a
@@ -176,7 +175,7 @@ let iter_install f instfile o =
   let dest_global ?fix instdir_f = dest ?fix (instdir_f o.prefix ()) in
   let dest_pkg ?fix instdir_f =
     let fix =
-      OpamStd.Option.map (fun d ->
+      Option.map (fun d ->
           d / OpamPackage.Name.to_string o.pkgname)
         fix
     in
@@ -195,7 +194,9 @@ let iter_install f instfile o =
       dest_pkg                    D.share,    S.share instfile,      false;
       dest_global                 D.share_dir,S.share_root instfile, false;
       dest_pkg                    D.etc,      S.etc instfile,        false;
-      dest_pkg    ?fix:o.docdir   D.doc,      S.doc instfile,        false; ]
+      dest_pkg    ?fix:o.docdir   D.doc,      S.doc instfile,        false;
+      dest                        o.prefix,   S.root instfile,       false;
+      dest                        o.prefix,   S.rootexec instfile,   true;  ]
 
 let install options =
   let instfile = OpamFile.Dot_install.safe_read options.file in
@@ -305,7 +306,7 @@ let options =
     let file =
       match file with
       | Some file ->
-        let f = OpamFilename.of_string (file ^ ".install") in
+        let f = OpamFilename.of_string (file ^ OpamPathName.install_suffix) in
         if OpamFilename.exists f then f else
         let f = OpamFilename.of_string file in
         if OpamFilename.exists f then f else
@@ -313,7 +314,8 @@ let options =
       | None ->
         let candidates = OpamFilename.files (OpamFilename.cwd ()) in
         match
-          List.filter (fun f -> OpamFilename.check_suffix f ".install")
+          List.filter
+            (fun f -> OpamFilename.check_suffix f OpamPathName.install_suffix)
             candidates
         with
         | [f] -> f
@@ -334,8 +336,9 @@ let options =
     let prefix = OpamFilename.Dir.of_string prefix in
     let pkgname = match name with
       | Some n -> OpamPackage.Name.of_string n
-      | None
-        when OpamFilename.check_suffix (OpamFile.filename file) ".install" ->
+      | None when
+          OpamFilename.check_suffix (OpamFile.filename file)
+            OpamPathName.install_suffix ->
         OpamPackage.Name.of_string
           (OpamFilename.Base.to_string
              (OpamFilename.basename
@@ -382,17 +385,17 @@ let command =
 let info =
   let doc = "Handles (un)installation of package files following instructions from \
              opam *.install files." in
-  Term.info "opam-installer" ~version:OpamVersion.(to_string current) ~doc
+  Cmd.info "opam-installer" ~version:OpamVersion.(to_string current) ~doc ~exits:[]
 
 let () =
   OpamSystem.init ();
   OpamCoreConfig.init ();
   try
     match
-      Term.eval ~catch:false (command,info)
+      Cmd.eval ~catch:false (Cmd.v info command)
     with
-    | `Error _ -> exit 2
-    | _ -> exit 0
+    | 0 -> exit 0
+    | _ -> exit 2
   with
   | Invalid_argument s ->
     OpamConsole.error "%s" s; exit 2

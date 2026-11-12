@@ -42,13 +42,23 @@ type unlocked = [ `Lock_none | ro ]
 (** The super-type for all lock types *)
 type +'a lock = [< unlocked > `Lock_write ] as 'a
 
+(** Type of global state global variables *)
+type gt_variables =
+  (variable_contents option Lazy.t * string) OpamVariable.Map.t
+
+type gt_changes = { gtc_repo: bool; gtc_switch: bool }
+
 (** Global state corresponding to an opam root and its configuration *)
 type +'lock global_state = {
   global_lock: OpamSystem.lock;
+  (** Global config lock file *)
+
+  lock: OpamSystem.lock;
+  (** Global lock file *)
 
   root: OpamPath.t;
-  (** The global OPAM root path (caution: this is stored here but some code may
-      rely on OpamStateConfig.root_dir ; in other words, multiple root handling
+  (** The global opam root path (caution: this is stored here but some code may
+      rely on {!OpamStateConfig.root_dir} ; in other words, multiple root handling
       isn't really supported at the moment) *)
 
   config: OpamFile.Config.t;
@@ -57,12 +67,47 @@ type +'lock global_state = {
       may be overridden through the command-line or environment, see
       OpamStateConfig *)
 
-  global_variables:
-    (variable_contents option Lazy.t * string) OpamVariable.Map.t;
+  global_variables: gt_variables;
   (** A map of variables that have been defined globally, e.g. through
       `.opam/config`. They may need evaluation so are stored as lazy values.
       The extra string is the supplied variable documentation *)
+
+  global_state_to_upgrade: gt_changes;
+  (** If the global config was upgraded on-the-fly, indicates if the either the repo or switch config
+    require the global config to be written (i.e. a hard upgrade to the global config) *)
+
 } constraint 'lock = 'lock lock
+
+
+(** OSes family for external dependencies system polling *)
+
+type os_dummy_test_setup = {
+  osd_install: bool;
+  osd_installed: [ `all | `none | `set of OpamSysPkg.Set.t];
+  osd_available: [ `all | `none | `set of OpamSysPkg.Set.t];
+}
+
+(* Please keep this alphabetically ordered, in the type definition, and in
+   its pattern matching *)
+type os_family =
+  | Alpine
+  | Altlinux
+  | Arch
+  | Centos
+  | Cygwin
+  | Debian
+  | Dummy of os_dummy_test_setup
+  | Freebsd
+  | Gentoo
+  | Homebrew
+  | Macports
+  | Msys2
+  | Netbsd
+  | Nix
+  | Openbsd
+  | Suse
+
+type repo_syspkgs_available = (os_family * OpamSysPkg.availability_mode) option
 
 (** State corresponding to the repo/ subdir: all available packages and
     metadata, for each repository. *)
@@ -80,9 +125,10 @@ type +'lock repos_state = {
   repo_opams: OpamFile.OPAM.t package_map repository_name_map;
   (** All opam files that can be found in the configured repositories *)
 
-  repos_tmp: (OpamRepositoryName.t, OpamFilename.Dir.t Lazy.t) Hashtbl.t;
-  (** Temporary directories containing the uncompressed contents of the
-      repositories *)
+  repos_syspkgs_available : repo_syspkgs_available;
+  (** All available system packages required by the repo's packages.
+      [None] when depext system is disabled or unavailable. *)
+
 } constraint 'lock = 'lock lock
 
 
@@ -130,18 +176,18 @@ type +'lock switch_state = {
       initialised for otherwise available packages *)
 
   available_packages: package_set Lazy.t;
-  (** The set of available packages, filtered by their [available:] field *)
+  (** The set of available packages, filtered by their [available] field *)
 
   pinned: package_set;
   (** The set of pinned packages (their metadata, including pinning target, is
-      in [opams]) *)
+      in {!field:opams}) *)
 
   installed: package_set;
   (** The set of all installed packages *)
 
   installed_opams: OpamFile.OPAM.t package_map;
   (** The cached metadata of installed packages (may differ from the metadata
-      that is in [opams] for updated packages) *)
+      that is in {!field:opams} for updated packages) *)
 
   installed_roots: package_set;
   (** The set of packages explicitly installed by the user. Some of them may
@@ -154,7 +200,11 @@ type +'lock switch_state = {
   invalidated: package_set Lazy.t;
   (** The set of packages which are installed but no longer valid, e.g. because
       of removed system dependencies. Only packages which are unavailable end up
-      in this set, they are otherwise put in [reinstall]. *)
+      in this set, they are otherwise put in {!field:reinstall}. *)
+
+  overwrote_opams: (bool * OpamFile.OPAM.t) package_map;
+  (** In case of simulated pins, keep the old information of opam files. The
+      boolean is set to true if the package was previously pinned. *)
 
   (* Missing: a cache for
      - switch-global and package variables
@@ -166,3 +216,35 @@ type provenance = [ `Env          (** Environment variable *)
                   | `Command_line (** Command line *)
                   | `Default      (** Default value *)
                   ]
+
+(** Pinned opam files informations *)
+
+(**/**)
+(* Opam file to pin informations.
+   {!_topin_opamfile} and {!_topin_name_and_opamfile} are not meant to be used
+   directly ; use rather below defined types ;*)
+type 'url _topin_opamfile = {
+  pin_file: OpamFile.OPAM.t OpamFile.t;
+  pin_locked: string option;
+  pin_subpath: subpath option;
+  pin_url: 'url;
+}
+type ('name, 'url) _topin_name_and_opamfile = {
+  pin_name: 'name;
+  pin: 'url _topin_opamfile;
+}
+(**/**)
+
+type name_and_file = (name, unit) _topin_name_and_opamfile
+type name_and_file_w_url = (name, url) _topin_name_and_opamfile
+type nameopt_and_file = (name option, unit) _topin_name_and_opamfile
+type nameopt_and_file_w_url = (name option, url) _topin_name_and_opamfile
+
+(* Pinned package informations *)
+type pinned_opam = {
+  pinned_name : name;
+  pinned_version : version option;
+  pinned_opam : OpamFile.OPAM.t option;
+  pinned_subpath: subpath option;
+  pinned_url: url;
+}

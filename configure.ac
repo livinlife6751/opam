@@ -1,5 +1,5 @@
-dnl The line below must be formatted AC_INIT(opam,VERSION) with no extra spaces
-AC_INIT(opam,2.1.0~beta4)
+dnl The line below must be formatted AC_INIT([opam],[VERSION]) with no extra spaces
+AC_INIT([opam],[2.7.0~alpha1~dev])
 AC_COPYRIGHT(Copyright 2012-2019 OcamlPro SAS)
 
 AC_CONFIG_MACRO_DIR([m4])
@@ -14,14 +14,20 @@ AS_IF([ test -x bootstrap/ocaml/bin/ocamlc -o -x bootstrap/ocaml/bin/ocamlopt ],
   export PATH="$PATH_PREPEND$PATH"
 ])
 
-# XXX This isn't strictly correct for Windows
-MIN_OCAML_VERSION=4.02.3
+MIN_OCAML_VERSION=4.11.0
 
 AC_PROG_OCAML
-if test "x$OCAMLC" = "xno"; then
-   AC_MSG_ERROR([You must install the OCaml compiler, at least version $MIN_OCAML_VERSION (or run: make compiler)])
-fi
 AC_CHECK_OCAML_OS_TYPE
+
+AS_IF([test "x${MAKE}" = "x" && test "${OCAML_OS_TYPE}" = "Unix"],[
+  MAKE="$(if command -v gmake &> /dev/null; then echo gmake; else echo make; fi)"
+],[
+  MAKE=${MAKE:-make}
+])
+
+if test "x$OCAMLC" = "xno"; then
+   AC_MSG_ERROR([You must install the OCaml compiler, at least version $MIN_OCAML_VERSION (or run: $MAKE compiler)])
+fi
 AS_IF([ test "${OCAML_OS_TYPE}" = "Win32"],[
   OCAMLLIB="$(echo "${OCAMLLIB}" | tr -d '\015' | sed -e 's|\\|/|g')"
   WIN32=1
@@ -49,28 +55,67 @@ AC_ARG_ENABLE([checks],
 )
 
 AC_ARG_ENABLE([developer_mode],
-  AC_HELP_STRING([--enable-developer-mode],
-                 [Enable developer features])
+  AS_HELP_STRING([--enable-developer-mode],[Enable developer features])
 )
 
 AC_ARG_WITH([mccs],
-  AC_HELP_STRING([--without-mccs],
-                 [Compile without a built-in Cudf solver (only works if 'mccs' is not otherwise installed)]),[],[MCCS_DEFAULT=yes]
+  AS_HELP_STRING([--without-mccs],[Compile without a built-in Cudf solver (only works if 'mccs' is not otherwise installed)])
+)
+AC_ARG_WITH([0install-solver],
+  AS_HELP_STRING([--without-0install-solver],[Legacy option (does nothing)])
+)
+AS_IF([test "x$with_0install_solver" = xno],
+  [AC_MSG_ERROR([Compiling opam without 0install solver is no longer possible.])]
 )
 
-AC_ARG_WITH([libacl],
-  AC_HELP_STRING([--with-libacl],
-                 [Compile opam with libacl support]),,[with_libacl=auto])
 
 AC_ARG_WITH([private_runtime],
-  AC_HELP_STRING([--with-private-runtime],
-                 [For a mingw-w64 build, manifest the runtime DLLs locally in Opam.Runtime.arch]),,[with_private_runtime=no]
+  AS_HELP_STRING([--with-private-runtime],[For a mingw-w64 build, manifest the runtime DLLs locally in Opam.Runtime.arch]),,[with_private_runtime=no]
 )
 
+AC_ARG_ENABLE([static],
+  AS_HELP_STRING([--enable-static],
+    [Compile the opam binary statically. Only Musl-based Linux distributions, Windows with MinGW, and OpenBSD are currently supported. This is the default on Windows with MinGW]),
+  [],
+  [enable_static=auto])
+
 AC_ARG_ENABLE([cold_check],
-  AC_HELP_STRING([--enable-cold-check],
-                 [Fail on some check necessary for make cold]),[COLD_CHECK=yes],[]
+  AS_HELP_STRING([--enable-cold-check],[Fail on some check necessary for make cold]),[COLD_CHECK=yes],[]
 )
+
+AC_ARG_WITH([dune],
+  AS_HELP_STRING([--without-dune],[Compile using vendored Dune instead of any in PATH]))
+
+AC_ARG_WITH([vendored-deps],
+  AS_HELP_STRING([--with-vendored-deps],[Use vendored dependencies instead of any available in the compiler installation]))
+
+AC_ARG_WITH([cygwin-setup],
+  AS_HELP_STRING([--with-cygwin-setup],["Embed Cygwin's setup.exe into the executable"]),
+  [AS_IF([test ${WIN32} -eq 0],[AC_MSG_ERROR([--with-cygwin-setup is only supported on Windows])])])
+
+AS_IF([test "x$with_cygwin_setup" != "x"],[
+  AS_CASE([$with_cygwin_setup],
+    [yes], [
+      dest='src_ext/archives'
+      mkdir -p "$dest"
+      dnl Always download setup, because it's not a fixed URL for each version
+      dnl of setup (in the way that the vendored source archives are)
+      rm -f "$dest/setup-x86_64.exe" "$dest/sha512.sum"
+      curl --output-dir "$dest" -fsSLO https://cygwin.com/setup-x86_64.exe
+      curl -fsSL https://cygwin.com/sha512.sum | grep -F setup-x86_64.exe > "$dest/sha512.sum"
+      AS_IF([test ! -e "$dest/sha512.sum" || \
+             test ! -e "$dest/setup-x86_64.exe" || \
+             ! ( cd "$dest" && sha512sum -c sha512.sum ) ],[
+        AC_MSG_ERROR([Failed to download and verify Cygwin's setup-x86_64.exe])
+      ])
+      CYGWIN_SETUP="$dest/setup-x86_64.exe"
+    ],
+    [no], [],
+    [CYGWIN_SETUP=$(cygpath -m "$with_cygwin_setup")])
+  AS_IF([test "x" != "x$CYGWIN_SETUP"],[
+    ocaml shell/embed.ml "$CYGWIN_SETUP" > src/state/opamEmbeddedCygwinSetup.ml
+  ])
+])
 
 AS_IF([test "x" != "x$LIB_PREFIX"], [
   CPATH=$CPATH:$LIB_PREFIX/include
@@ -81,27 +126,27 @@ AC_SUBST(LIB_PREFIX,$LIB_PREFIX)
 AC_SUBST(CPATH,$CPATH)
 AC_SUBST(LIBRARY_PATH,$LIBRARY_PATH)
 
-# Check that OCaml version is greater or equal to 4.02.3
-# Native Windows builds require at least 4.06.0 for the Unicode runtime.
 AS_IF([test "x${enable_version_check}" != "xno"], [
-  AS_IF([ test ${WIN32} -eq 1 ],[MIN_OCAML_VERSION=4.06.0])
   AX_COMPARE_VERSION(
     [$OCAMLVERSION], [lt], [$MIN_OCAML_VERSION],
-    AC_MSG_ERROR([Your version of OCaml: $OCAMLVERSION is not supported]))
+    AC_MSG_ERROR([Your version of OCaml ($OCAMLVERSION) is not supported]))
 ])
 
 AC_MSG_CHECKING([for compiler type])
-CCOMP_TYPE=`$OCAML shell/print_config.ml ccomp_type 2>/dev/null | fgrep -v "Cannot find" || $OCAMLC -config | tr -d '\r' | sed -n -e "s/ccomp_type: //p"`
+CCOMP_TYPE=`$OCAML shell/print_config.ml ccomp_type 2>/dev/null | grep -F -v "Cannot find" || $OCAMLC -config | tr -d '\r' | sed -n -e "s/ccomp_type: //p"`
 AS_IF([ test "$?" -eq 0 ],,[AC_MSG_ERROR([failed])] )
 AC_MSG_RESULT([$CCOMP_TYPE])
 AC_MSG_CHECKING([for compiler architecture])
-ARCH=`$OCAML shell/print_config.ml arch 2>/dev/null | fgrep -v "Cannot find" || $OCAMLC -config | tr -d '\r' | sed -n -e "s/architecture: //p"`
+ARCH=`$OCAML shell/print_config.ml arch 2>/dev/null | grep -F -v "Cannot find" || $OCAMLC -config | tr -d '\r' | sed -n -e "s/architecture: //p"`
 AS_IF([ test "$?" -eq 0 ],,[AC_MSG_ERROR([failed])] )
 AC_MSG_RESULT([$ARCH])
 AC_MSG_CHECKING([for compiler system])
-SYSTEM=`$OCAML shell/print_config.ml system 2>/dev/null | fgrep -v "Cannot find" || $OCAMLC -config | tr -d '\r' | sed -n -e "s/system: //p"`
+SYSTEM=`$OCAML shell/print_config.ml system 2>/dev/null | grep -F -v "Cannot find" || $OCAMLC -config | tr -d '\r' | sed -n -e "s/system: //p"`
 AC_MSG_RESULT([$SYSTEM])
 AC_SUBST(SYSTEM)
+AC_MSG_CHECKING([for compiler target])
+TARGET=`$OCAML shell/print_config.ml target 2>/dev/null | grep -F -v "Cannot find" || $OCAMLC -config | tr -d '\r' | sed -n -e "s/target: //p"`
+AC_MSG_RESULT([$TARGET])
 
 LIB_PREPEND=
 INC_PREPEND=
@@ -145,28 +190,8 @@ AS_IF([test "x${enable_developer_mode}" = "xyes"],[
 
 AS_IF([test "x${with_mccs}" = "xno"], [AC_SUBST(MCCS_ENABLED,false)], [AC_SUBST(MCCS_ENABLED,true)])
 
-AS_IF([test "x${with_libacl}" != "xno"],[
-  have_libacl=yes
-  AC_CHECK_HEADER([acl/libacl.h],,[have_libacl=no])
-  AC_SEARCH_LIBS([acl_get_perm],[acl],,[have_libacl=no])
-  AS_IF([test "x${SYSTEM}" = "xcygwin"],[
-    AS_IF([test "x${have_libacl}" = "xno"],[AC_MSG_ERROR([opam on Cygwin requires libacl])],[with_libacl=yes])
-  ])
-  AS_IF([test "x${with_libacl}${have_libacl}" = "xyesno"],[AC_MSG_ERROR([libacl not found])])
-])
-AS_IF([test "x${with_libacl}" = "xyes"],[
-  AS_IF([test "x${ac_cv_search_acl_get_perm}" = "xnone required"],[
-    AC_SUBST(CONF_LIBACL_LINK,[])
-  ],[
-    AC_SUBST(CONF_LIBACL_LINK,[${ac_cv_search_acl_get_perm}])
-  ])
-])
+CONF_OCAMLFLAGS=''
 
-CONF_OCAMLFLAGS="-w -67"
-
-AS_IF([test "x${CI}" != "x"], [
-  CONF_OCAMLFLAGS="${CONF_OCAMLFLAGS} -w -67"
-],[])
 AS_IF([test "x${CI}" != "x" -o "x${enable_developer_mode}" = "xyes"],[
   AS_IF([test "x${CCOMP_TYPE}" = "xmsvc"],[
     CONF_CFLAGS="\"/WX\""
@@ -192,11 +217,17 @@ AS_IF([ test ${WIN32} -eq 1 -a "$GCC" = "yes"],[
 AS_IF([ test ${WIN32} -eq 1 ],[
   AS_IF([ test "$GCC" = "yes"], [
     AS_IF([ test "x${CC64}" = "x" ], [
-      AS_IF([ test "$ARCH" = "i386" ],[T_CC64=x86_64-w64-mingw32-gcc],[T_CC64=i686-w64-mingw32-gcc])])
+      AS_IF([ test "$ARCH" = "i386" ],
+        [T_CC64=x86_64-w64-mingw32-gcc
+        COMP_ARCH='x86_64'
+        ac_tool_prefix='i686-w64-mingw32-'],
+        [T_CC64=i686-w64-mingw32-gcc
+        COMP_ARCH='i686'
+        ac_tool_prefix='x86_64-w64-mingw32-'])])
     AC_CHECK_TOOL(CC64,[${T_CC64}],[no])
     AS_IF([ test "x${CC64}" != "xno" ],[
-      echo "${CC64} -o " > src/stubs/win32/cc64
-      echo " -Wdeclaration-after-statement " >> src/stubs/win32/cc64
+      echo "${CC64} -o " > src/core/cc64
+      echo " -Wdeclaration-after-statement -municode " >> src/core/cc64
     ])
   ],[
     AC_MSG_CHECKING([whether Microsoft Linker needs a PATH shim])
@@ -220,18 +251,18 @@ AS_IF([ test ${WIN32} -eq 1 ],[
       AC_MSG_RESULT([from $MSVS_NAME])
       CL_FULL="`PATH="${MSVS_PATH}:${PATH}" which cl | cygpath -f - -w`"
       MSVS_PATH="`echo "${MSVS_PATH}" | cygpath -f - -wp`"
-      echo "cl /nologo /Fe" > src/stubs/win32/cc64
-      echo " " >> src/stubs/win32/cc64
-      echo "PATH" >> src/stubs/win32/cc64
-      echo "${MSVS_PATH}" >> src/stubs/win32/cc64
-      echo "LIB" >> src/stubs/win32/cc64
-      echo "${MSVS_LIB}" >> src/stubs/win32/cc64
-      echo "INCLUDE" >> src/stubs/win32/cc64
-      echo "${MSVS_INC}" >> src/stubs/win32/cc64
+      echo "cl /nologo /Fe" > src/core/cc64
+      echo " " >> src/core/cc64
+      echo "PATH" >> src/core/cc64
+      echo "${MSVS_PATH}" >> src/core/cc64
+      echo "LIB" >> src/core/cc64
+      echo "${MSVS_LIB}" >> src/core/cc64
+      echo "INCLUDE" >> src/core/cc64
+      echo "${MSVS_INC}" >> src/core/cc64
     ])
   ])
   AS_IF([ test "x${CC64}" = "xno" ],[
-    AC_MSG_WARN([Complementary C compiler not found - opam-putenv will not be built])
+    AC_MSG_ERROR([${COMP_ARCH} C compiler not found - opam-putenv cannot be built])
   ])
 ])
 
@@ -250,7 +281,6 @@ AS_IF([test "x${enable_certificate_check}" = "xno"], [
 AC_CHECK_PROGS(FETCH,[curl wget],no)
 
 AC_CHECK_TOOL(DUNE,dune)
-AC_CHECK_TOOL(CPPO,cppo)
 AC_CHECK_TOOL(PATCH,patch)
 AC_CHECK_TOOL(BUNZIP2,bunzip2)
 
@@ -258,6 +288,12 @@ AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [4.08.0],
   [DUNE_SECONDARY=src_ext/secondary/ocaml/bin/ocaml],
   [DUNE_SECONDARY=])
 AC_SUBST([DUNE_SECONDARY])
+
+AS_CASE([$DUNE,$with_dune],
+  [,yes],     [AC_MSG_ERROR([Dune was not found in PATH])],
+  [*,no],     [DUNE=''],
+  [*,|*,yes], [],
+  [DUNE="$with_dune"])
 
 if test "x${COLD_CHECK}" = "xyes" ; then
   if test "x$PATCH"  = "x" ; then
@@ -271,7 +307,7 @@ fi
 AS_IF([test "${OCAML_OS_TYPE}" = "Win32"],[
   AC_MSG_CHECKING([for a workable solution for ln -s])
   ln -s configure conftestLink
-  AS_IF([test "`cmd /c dir conftestLink 2>/dev/null | fgrep SYMLINK`" = ""],[LN_S="cp -a"],[LN_S="ln -s"])
+  AS_IF([test "`cmd /c dir conftestLink 2>/dev/null | grep -F SYMLINK`" = ""],[LN_S="cp -a"],[LN_S="ln -s"])
   AC_MSG_RESULT([$LN_S])
 ],[
   LN_S="ln -s"
@@ -283,7 +319,7 @@ if test x"$FETCH" = x"curl" ; then
 elif test x"$FETCH" = x"wget" ; then
   AC_SUBST(fetch, "wget $wget_certificate_check -O \$(2) \$(1)")
 elif test x"${enable_checks}" != x"no" ; then
-  if ! ${MAKE:-make} -q -C src_ext has-archives 2>/dev/null ; then
+  if ! ${MAKE} -q -C src_ext has-archives 2>/dev/null ; then
     AC_MSG_ERROR([You must have either curl or wget installed.])
   fi
 fi
@@ -307,20 +343,67 @@ AS_IF([test "x${with_private_runtime}" != "xno"],[
 ],[CONF_MANIFEST_O=])
 AC_SUBST(CONF_MANIFEST_O)
 
+# Handle --enable-static
+AC_MSG_CHECKING([for linking method])
+support_static=no
+default_static=no
+AS_CASE([$TARGET],
+  [*-linux-musl*],[
+    support_static=yes
+    platform_dependent_stuff="-cclib -lstdc++ -cclib -static-libgcc -cclib -static"
+  ],
+  [*-*-mingw32*],[
+    support_static=yes
+    AS_IF([test "x${with_private_runtime}" = "xno"],[default_static=yes])
+    # NOTE: On Windows, the Windows specific dlls should stay dynamic for security reasons
+    # NOTE: -l:libstdc++.a is necessary (vs. -lstdc++) as flexlink will use libstdc++.dll.a
+    # which still depends on the DLL at runtime instead of libstdc++.a (that looks like a bug in flexlink)
+    platform_dependent_stuff="-cclib -l:libstdc++.a -cclib -l:libpthread.a -cclib -Wl,-static -cclib -ladvapi32 -cclib -lgdi32 -cclib -luser32 -cclib -lshell32 -cclib -lole32 -cclib -luuid -cclib -luserenv"
+    AS_IF([test "x${SYSTEM}" = "xmingw"], [platform_dependent_stuff="${platform_dependent_stuff} -cclib -lwindowsapp"])
+  ],
+  [*-*-openbsd*],[
+    support_static=yes
+    platform_dependent_stuff="-cclib -lc++ -cclib -lc++abi -cclib -static"
+  ])
+AS_CASE([${support_static},${enable_static}],
+  [no,yes],[AC_MSG_ERROR([--enable-static is not available on this platform (${TARGET}).])],
+  [*,auto],[enable_static=${default_static}])
+AS_IF([test "${enable_static}" = yes],[
+  AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [5.0.0],[
+    unix_lib_name=unix
+  ],[
+    unix_lib_name=unixnat
+  ])
+  echo "(-noautolink -cclib -l${unix_lib_name} -cclib -lmccs_stubs -cclib -lmccs_glpk_stubs -cclib -lsha_stubs -cclib -lopam_core_stubs -cclib -lcheckseum_c_stubs ${platform_dependent_stuff})" > src/client/linking.sexp
+  AC_MSG_RESULT([static])
+],[
+  AC_MSG_RESULT([shared])
+])
+
 echo
 
+# Dependencies
 AC_CHECK_OCAML_PKG([unix])
-AC_CHECK_OCAML_PKG([bigarray])
-AC_CHECK_OCAML_PKG([extlib])
-AC_CHECK_OCAML_PKG([re])
-AC_CHECK_OCAML_PKG([re.glob])
-AC_CHECK_OCAML_PKG([cmdliner])
-AC_CHECK_OCAML_PKG([ocamlgraph])
-AC_CHECK_OCAML_PKG([cudf])
-AC_CHECK_OCAML_PKG(dose3.common,dose.common)
-AC_CHECK_OCAML_PKG(dose3.algo,dose.algo)
-AC_CHECK_OCAML_PKG([opam-file-format])
-AC_CHECK_OCAML_PKG([mccs])
+AC_CHECK_OCAML_PKG_AT_LEAST([re], [1.10.0])
+AC_CHECK_OCAML_PKG_AT_LEAST([base64], [3.1.0])
+AC_CHECK_OCAML_PKG_AT_LEAST([ocamlgraph], [1.8.8])
+AC_CHECK_OCAML_PKG_AT_LEAST([cudf], [0.11~rc1])
+AC_CHECK_OCAML_PKG_AT_LEAST([dose3.common], [6.1])
+AC_CHECK_OCAML_PKG_AT_LEAST([dose3.algo], [6.1])
+AC_CHECK_OCAML_PKG_AT_LEAST([opam-file-format], [2.1.4])
+AC_CHECK_OCAML_PKG_AT_LEAST([spdx_licenses], [1.4.0])
+AC_CHECK_OCAML_PKG_AT_LEAST([opam-0install-cudf],[0.5.0])
+AC_CHECK_OCAML_PKG_AT_LEAST([jsonm], [1.0.2])
+AC_CHECK_OCAML_PKG_AT_LEAST([uutf], [1.0.3])
+AC_CHECK_OCAML_PKG_AT_LEAST([sha], [1.13])
+AC_CHECK_OCAML_PKG_AT_LEAST([swhid_core], [0.1])
+AC_CHECK_OCAML_PKG_AT_LEAST([patch], [3.0.0])
+AC_CHECK_OCAML_PKG_AT_LEAST([tar], [3.3.0])
+AC_CHECK_OCAML_PKG_AT_LEAST([checkseum], [0.5.2])
+AC_CHECK_OCAML_PKG_AT_LEAST([decompress], [1.5.1])
+
+# Optional dependencies
+AC_CHECK_OCAML_PKG_AT_LEAST([mccs],[1.1+17])
 
 AS_IF([test "x${with_mccs}" = "xno" && test "x$OCAML_PKG_mccs" != "xno"],
       [AC_MSG_ERROR([Option --without-mccs is not available without uninstalling the 'mccs' package])])
@@ -335,48 +418,47 @@ dnl       AC_SUBST(OCAML_PKG_mccs,"no")])
 AS_IF([test "x$MCCS_ENABLED" = "xtrue"],[
   AS_IF([test "x${CCOMP_TYPE}" != "xmsvc"],[
     AC_PROG_CXX
-    # Curiously, CXX=g++ && GXX= seems to be how autoconf "signals" that no C++
-    # compiler was found.
-    AS_IF([test "x$CXX" = "xg++" -a "x$GXX" != "xyes"],[
-      AS_IF([test "x$MCCS_DEFAULT" = "xyes"],[
-        AC_SUBST(MCCS_ENABLED,false)
-      ],[
-        AS_IF([test "x${enable_checks}" != "xno"],[
-          AC_MSG_ERROR([A C++ compiler is required to build mccs])
-        ])
-      ])
+  ])
+])
+
+# Curiously, autoconf doesn't actually detect a C++ compiler!
+AS_IF([test -n "$CXX"],[
+  CHECK_CXX_WORKS
+  AS_IF([test -z "$CXX"],[
+    AS_IF([test "x${enable_checks}" != "xno"],[
+      AC_MSG_ERROR([A C++ compiler is required to build mccs])
     ])
   ])
 ])
 
-
-dnl echo
-dnl echo "extlib........................ ${OCAML_PKG_extlib}"
-dnl echo "re............................ ${OCAML_PKG_re}"
-dnl echo "cmdliner...................... ${OCAML_PKG_cmdliner}"
-dnl echo "graph......................... ${OCAML_PKG_ocamlgraph}"
-dnl echo "cudf.......................... ${OCAML_PKG_cudf}"
-dnl echo "dose3......................... ${OCAML_PKG_dose3}"
 echo
 
 AS_IF([test "x${enable_checks}" != "xno" && {
        test "x$OCAML_PKG_extlib" = "xno" ||
        test "x$OCAML_PKG_re" = "xno" ||
-       test "x$OCAML_PKG_cmdliner" = "xno" ||
+       test "x$OCAML_PKG_base64" = "xno" ||
        test "x$OCAML_PKG_ocamlgraph" = "xno" ||
        test "x$OCAML_PKG_cudf" = "xno" ||
        test "x$OCAML_PKG_dose3_common" = "xno" ||
+       test "x$OCAML_PKG_dose3_algo" = "xno" ||
        test "x$OCAML_PKG_opam_file_format" = "xno" ||
-       test "x$CPPO" = "x" ||
+       test "x$OCAML_PKG_spdx_licenses" = "xno" ||
+       test "x$OCAML_PKG_opam_0install_cudf" = "xno" ||
+       test "x$OCAML_PKG_jsonm" = "xno" ||
+       test "x$OCAML_PKG_uutf" = "xno" ||
+       test "x$OCAML_PKG_sha" = "xno" ||
+       test "x$OCAML_PKG_swhid_core" = "xno" ||
+       test "x$OCAML_PKG_patch" = "xno" ||
        test "x$OCAML_PKG_mccs$MCCS_ENABLED" = "xnotrue";}],[
-  echo "============================================================================"
-  echo "Some dependencies are missing. If you are just interested in the stand-alone"
-  echo "'opam' binary, run 'make lib-ext' to download and include them."
-  echo "============================================================================"
-  echo
-  AC_SUBST(hasalldeps,"")
+  AS_IF([test "x${with_vendored_deps}" != "xyes"],[
+    AC_MSG_ERROR([Dependencies missing. Use --with-vendored-deps or --disable-checks])
+  ])
+])
+
+AS_IF([test "x${with_vendored_deps}" = "xyes"],[
+  AC_SUBST(VENDORED,"true")
 ],[
-  AC_SUBST(hasalldeps,"true")
+  AC_SUBST(VENDORED,"false")
 ])
 
 if test "x$prefix" = "xNONE"; then
@@ -386,8 +468,7 @@ fi
 AC_CONFIG_FILES(
   Makefile.config
   src/ocaml-flags-configure.sexp
-  src/stubs/c-flags.sexp
-  src/stubs/libacl/c-libraries.sexp
+  src/core/c-flags.sexp
 )
 AC_OUTPUT
 
@@ -403,19 +484,6 @@ AS_IF([test "x${with_private_runtime}" != "xno"],[
   ])
 ])
 
-rm -f src/stubs/win32/dune
-AS_IF([ test ${WIN32} -eq 1],[
-  cd src/stubs/win32
-  ${LN_S} -f dune-win32 dune
-  cd ../../..
-])
-rm -f src/stubs/libacl/dune
-AS_IF([ test "x${with_libacl}" = "xyes" ],[
-  cd src/stubs/libacl
-  ${LN_S} -f dune-libacl dune
-  cd ../../..
-])
-
 echo
 
 bindir="`eval echo ${bindir}`"
@@ -424,10 +492,20 @@ mandir="`eval echo ${mandir}`"
 mandir="`eval echo ${mandir}`"
 
 AS_IF([test "x$MCCS_ENABLED" = "xfalse"],[
-  echo "Opam will be built WITHOUT a built-in solver"
+  echo "Opam will be built WITHOUT its default built-in solver"
 ],[
-  echo "Opam will be built WITH a built-in solver"
+  echo "Opam will be built WITH its default built-in solver"
 ])
 echo
 echo Executables will be installed in ${bindir}
 echo Manual pages will be installed in ${mandir}
+
+AS_IF([test "x${VENDORED}" = "xtrue"],[
+  echo
+  AS_ECHO(["Downloading vendored source dependencies..."])
+  ${MAKE} --no-print-directory -C src_ext SILENT=@ archives
+  AS_ECHO([done])
+  AS_ECHO_N(["Extracting vendored source dependencies in src_ext/... "])
+  ${MAKE} --no-print-directory -C src_ext SILENT=@ clone
+  AS_ECHO([done])
+])

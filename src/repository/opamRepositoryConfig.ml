@@ -14,8 +14,9 @@ module E = struct
 
   type OpamStd.Config.E.t +=
     | CURL of string option
-    | FETCH of string option
+    | FETCH of string list option
     | NOCHECKSUMS of bool option
+    | REPOSITORYTARRING of bool option
     | REQUIRECHECKSUMS of bool option
     | RETRIES of int option
     | VALIDATIONHOOK of string option
@@ -24,10 +25,13 @@ module E = struct
   let curl = value (function CURL s -> s | _ -> None)
   let fetch = value (function FETCH s -> s | _ -> None)
   let nochecksums = value (function NOCHECKSUMS b -> b | _ -> None)
+  let repositorytarring = value (function REPOSITORYTARRING b -> b | _ -> None)
   let requirechecksums = value (function REQUIRECHECKSUMS b -> b | _ -> None)
   let retries = value (function RETRIES i -> i | _ -> None)
   let validationhook = value (function VALIDATIONHOOK s -> s | _ -> None)
 
+  let curl_t () = value_t (function CURL s -> s | _ -> None)
+  let fetch_t () = value_t (function FETCH s -> s | _ -> None)
 end
 
 type dl_tool_kind = [ `Curl | `Default ]
@@ -37,6 +41,7 @@ type t = {
   validation_hook: arg list option;
   retries: int;
   force_checksums: bool option;
+  repo_tarring : bool;
 }
 
 type 'a options_fun =
@@ -44,19 +49,21 @@ type 'a options_fun =
   ?validation_hook:arg list option ->
   ?retries:int ->
   ?force_checksums:bool option ->
+  ?repo_tarring:bool ->
   'a
 
 let default = {
+  (* Keep synchronised with [OpamInitDefaults.req_dl_tools] *)
   download_tool = lazy (
     let os = OpamStd.Sys.os () in
     try
       let curl = "curl", `Curl in
       let tools =
         match os with
-        | Darwin  -> ["wget", `Default; curl]
-        | FreeBSD -> ["fetch", `Default ; curl]
-        | OpenBSD -> ["ftp", `Default; curl]
-        | _ -> [curl; "wget", `Default]
+        | FreeBSD | DragonFly -> [curl; "fetch", `Default]
+        | OpenBSD | NetBSD -> [curl; "ftp", `Default]
+        | Linux | Darwin | Cygwin | Win32 | Haiku
+        | Unix | Other _ -> [curl; "wget", `Default]
       in
       let cmd, kind =
         List.find (fun (c,_) -> OpamSystem.resolve_command c <> None) tools
@@ -75,13 +82,15 @@ let default = {
   validation_hook = None;
   retries = 3;
   force_checksums = None;
+  repo_tarring = false;
 }
 
-let setk k t
+let[@ocaml.warning "-unerasable-optional-argument"] setk k t
     ?download_tool
     ?validation_hook
     ?retries
     ?force_checksums
+    ?repo_tarring
   =
   let (+) x opt = match opt with Some x -> x | None -> x in
   k {
@@ -89,6 +98,7 @@ let setk k t
     validation_hook = t.validation_hook + validation_hook;
     retries = t.retries + retries;
     force_checksums = t.force_checksums + force_checksums;
+    repo_tarring = t.repo_tarring + repo_tarring;
   }
 
 let set t = setk (fun x () -> x) t
@@ -100,12 +110,10 @@ let update ?noop:_ = setk (fun cfg () -> r := cfg) !r
 let initk k =
   let open OpamStd.Option.Op in
   let download_tool =
-    E.fetch () >>= (fun s ->
-        let args = OpamStd.String.split s ' ' in
-        match args with
+    E.fetch () >>= (function
         | cmd::a ->
           let cmd, kind =
-            if OpamStd.String.ends_with ~suffix:"curl" cmd then
+            if OpamCompat.String.ends_with ~suffix:"curl" cmd then
               (CIdent "curl", None), `Curl
             else if cmd = "wget" then
               (CIdent "wget", None), `Default
@@ -113,13 +121,19 @@ let initk k =
               (CString cmd, None), `Default
           in
           let c = cmd :: List.map (fun a -> OpamTypes.CString a, None) a in
-          Some (lazy (c, kind))
+          Some (c, kind)
         | [] ->
           None
       )
-    >>+ fun () ->
-    E.curl () >>| (fun s ->
-        lazy ([CString s, None], `Curl))
+    |> (fun fetch ->
+        match E.curl (), fetch with
+        | None, fetch -> Option.map Lazy.from_val fetch
+        | Some cmd, Some (((CIdent "curl"| CString "curl"), filter)::args, _) ->
+          Some (lazy ((CString cmd, filter)::args, `Curl))
+        | Some cmd, None ->
+          Some (lazy ([CString cmd, None], `Curl))
+        | Some _, _ -> (* ignored *)
+          Option.map Lazy.from_val fetch)
   in
   let validation_hook =
     E.validationhook () >>| fun s ->
@@ -139,5 +153,6 @@ let initk k =
     ?validation_hook
     ?retries:(E.retries ())
     ?force_checksums
+    ?repo_tarring:(E.repositorytarring ())
 
 let init ?noop:_ = initk (fun () -> ())

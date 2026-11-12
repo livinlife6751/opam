@@ -22,14 +22,15 @@ module Cache: sig
   val load:
     dirname ->
     (OpamFile.Repo.t repository_name_map *
-     OpamFile.OPAM.t package_map repository_name_map)
+     OpamFile.OPAM.t package_map repository_name_map *
+     repo_syspkgs_available)
       option
   val remove: unit -> unit
 end
 
 val load: 'a lock -> [< unlocked ] global_state -> 'a repos_state
 
-(** Loads the repository state as [load], and calls the given function while
+(** Loads the repository state as {!load}, and calls the given function while
     keeping it locked (as per the [lock] argument), releasing the lock
     afterwards *)
 val with_:
@@ -49,19 +50,57 @@ val build_index:
     ROOT/repos/) *)
 val get_repo: 'a repos_state -> repository_name -> repository
 
-val load_opams_from_dir: repository_name -> dirname -> OpamFile.OPAM.t OpamPackage.Map.t
+val load_opams_from_dir:
+  repository_name -> OpamRepositoryRoot.Dir.t ->
+  OpamFile.OPAM.t OpamPackage.Map.t
+
+val load_opams_from_tgz:
+  repository_name -> OpamRepositoryRoot.Tgz.t ->
+  OpamFile.OPAM.t OpamPackage.Map.t
+
+(** [load_opams_from_diff repo diffs rt] incrementally
+    updates package definitions by processing only changed files.
+
+    Starting from existing packages in [rt.repo_opams], it:
+    - Adds new packages
+    - Removes packages whose opam files were deleted
+    - Updates packages from changed opam files that exist
+
+      @param diffs List of [Patch.operation] representing creations, deletions,
+    and modifications of regular files
+*)
+val load_opams_from_diff:
+  repository -> Patch.operation list -> 'a repos_state
+  -> OpamFile.OPAM.t package_map
+
+val load_opams:
+  repository_name -> OpamRepositoryRoot.t -> OpamFile.OPAM.t package_map
 
 (** Load all the metadata within the local mirror of the given repository,
     without cache *)
 val load_repo:
-  repository -> OpamFilename.Dir.t ->
+  repository -> OpamRepositoryRoot.t ->
   OpamFile.Repo.t * OpamFile.OPAM.t OpamPackage.Map.t
 
-(** Get the (lazily extracted) repository root for the given repository *)
-val get_root: 'a repos_state -> repository_name -> OpamFilename.Dir.t
+(** Get the availability status of system packages of loaded repositories.
+    This function also checks if the stored os_family is the same, if not,
+    returns [None] *)
+val syspkgs_available:
+  ?env:gt_variables -> repo_syspkgs_available
+  -> OpamSysPkg.availability_mode option
 
-(** Same as [get_root], but with a repository rather than just a name as argument *)
-val get_repo_root: 'a repos_state -> repository -> OpamFilename.Dir.t
+(** Get the repository root for the given repository *)
+val get_root: 'a repos_state -> repository_name -> OpamRepositoryRoot.t
+
+(** Same as {!get_root}, but with a repository rather than just a name as argument *)
+val get_repo_root: 'a repos_state -> repository -> OpamRepositoryRoot.t
+
+(** [get_repo_files rt name dir] Returns files in repository root of repository
+    [name] from subdirectory [dir]. The returned list contains the basenames of
+    files, and the content of each file lazily. It is intended to be used with
+    {OpamFile.get_extra_files} to retrieve `files/` files.  *)
+val get_repo_files:
+  'a repos_state -> repository_name -> string -> (basename * string Lazy.t) list
 
 (* (\** Runs the given function with access to a (possibly temporary) directory
  *     containing the extracted structure of the given repository, and cleans it up
@@ -70,13 +109,13 @@ val get_repo_root: 'a repos_state -> repository -> OpamFilename.Dir.t
  * val with_repo_root:
  *   'a global_state -> repository -> (OpamFilename.Dir.t -> 'b) -> 'b
  * 
- * (\** As [with_repo_root], but on jobs *\)
+ * (\** As {!with_repo_root}, but on jobs *\)
  * val with_repo_root_job:
  *   'a global_state -> repository ->
  *   (OpamFilename.Dir.t -> 'b OpamProcess.job) -> 'b OpamProcess.job *)
 
-(** Releases any locks on the given repos_state, and cleans the tmp extracted
-    tree if any unless [cleanup=false] *)
+(** Releases any locks on the given repos_state.
+    [cleanup] is a no-op *)
 val unlock: ?cleanup:bool -> 'a repos_state -> unlocked repos_state
 
 (** Releases any locks on the given repos_state and then ignores it.
@@ -88,11 +127,7 @@ val unlock: ?cleanup:bool -> 'a repos_state -> unlocked repos_state
 *)
 val drop: ?cleanup:bool -> 'a repos_state -> unit
 
-(** Cleanup before removing the repository from temporary table *)
-val remove_from_repos_tmp: 'a repos_state -> repository_name -> unit
-
-(** Clears tmp files corresponding to a repo state (uncompressed repository
-    contents) *)
+(** Clears tmp files corresponding to a repo state *)
 val cleanup: 'a repos_state -> unit
 
 (** Calls the provided function, ensuring a temporary write lock on the given

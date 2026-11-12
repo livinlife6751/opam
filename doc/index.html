@@ -62,6 +62,8 @@ td.sublib {
   <td>Compatibility layer (Bytes, etc.) for different OCaml versions</td></tr>
 <tr><th><a href="opam-core/OpamSHA">opamSHA.ml</a></th>
   <td>Pure OCaml implementation of SHA256/512 hashing functions</td></tr>
+<tr><th><a href="opam-core/OpamShellCommand">opamShellCommand.ml</a></th>
+  <td>A shell command syntax parser</td></tr>
 
 <tr><td colspan="2" class="sublib">System handling</td></tr>
 
@@ -80,26 +82,20 @@ td.sublib {
   <td>Parallel execution of jobs following a directed graph</td></tr>
 <tr><th><a href="opam-core/OpamUrl">opamUrl.ml</a></th>
   <td>URL parsing and printing, with support for our different backends</td></tr>
+<tr><th><a href="opam-core/OpamPatch">opamPatch.ml</a></th>
+  <td>Patch application, translation and parsing</td></tr>
 
 <tr><td colspan="2" class="sublib">Windows support</td></tr>
 <tr><th><a href="opam-core/OpamStubs">opamStubs.ml</a></th>
   <td>C stubs for Windows. A &ldquo;dummy&rdquo; alternate is provided for Unix, which doesn&rsquo;t require any C code</td></tr>
 <tr><th><a href="opam-core/OpamStubsTypes">opamStubsTypes.ml</a></th>
   <td>Types in the stubs definitions (shared between both implementations)</td></tr>
-
-<tr class="lib">
-  <th><code>src/stubs</code></th>
-  <td><em>opam-stubs</em> library</td>
-</tr>
-
-<tr><td colspan="2" class="libnote">
-    C stubs. This library is built on Windows-only and automatically pulled into opam-core if needed
-</td></tr>
-
 <tr><th><a>opamInject.c</a></th>
   <td>Code for process injection shared between <a>opamWindows.c</a> and <a>opam-putenv.c</a></td></tr>
 <tr><th><a>opamWindows.c</a></th>
-  <td>C stubs themselves</td></tr>
+  <td>C stubs for Windows</td></tr>
+<tr><th><a>opamCommonStubs.c</a></th>
+  <td>Common C stubs for Unix and Windows</td></tr>
 
 <tr class="lib">
   <th><a href="opam-format"><code>src/format</code></a></th>
@@ -116,8 +112,14 @@ td.sublib {
   <td>Definitions of many types used throughout</td></tr>
 <tr><th><a href="opam-format/OpamTypesBase">opamTypesBase.ml</a></th>
   <td>Helper functions on the base types. Often opened</td></tr>
+<tr><th><a href="opam-format/OpamPathName">opamPathName.ml</a></th>
+  <td>Defines the names of internal opam root elements</td></tr>
 <tr><th><a href="opam-format/OpamPath">opamPath.ml</a></th>
   <td>Defines the file hierarchy in ~/.opam</td></tr>
+<tr><th><a href="opam-repository/OpamRepositoryPathName">opamRepositoryPathName.ml</a></th>
+  <td>Defines the names of a repository elements layout</td></tr>
+<tr><th><a href="opam-repository/OpamRepositoryPath">opamRepositoryPath.ml</a></th>
+  <td>Defines the file hierarchy in repositories</td></tr>
 
 <tr><td colspan="2" class="sublib">Basic types, used as keys</td></tr>
 
@@ -166,8 +168,8 @@ td.sublib {
   <td>Configuration options for this lib (record, global reference, setter, initialisation)</td></tr>
 <tr><th><a href="opam-repository/OpamRepositoryBackend">opamRepositoryBackend.ml</a></th>
   <td>Signature for repository handlers and some helpers for the repository type</td></tr>
-<tr><th><a href="opam-repository/OpamRepositoryPath">opamRepositoryPath.ml</a></th>
-  <td>Defines the file hierarchy in repositories</td></tr>
+<tr><th><a href="opam-repository/OpamRepositoryRoot">opamRepositoryRoot.ml</a></th>
+  <td>Defines the abstract type for repository roots and their basic operations</td></tr>
 <tr><th><a href="opam-repository/OpamDownload">opamDownload.ml</a></th>
   <td>Configuration init and handling of downloading commands</td></tr>
 <tr><th><a href="opam-repository/OpamHTTP">opamHTTP.ml</a></th>
@@ -184,6 +186,8 @@ td.sublib {
   <td>Mercurial support (through OpamVCS)</td></tr>
 <tr><th><a href="opam-repository/OpamRepository">opamRepository.ml</a></th>
   <td>Operations on repositories (update, fetch...) based on the above backends</td></tr>
+<tr><th><a href="opam-repository/OpamTar">opamTar.ml</a></th>
+  <td>Tar gaz archives manipulations: creations, folding, writing</td></tr>
 
 <tr class="lib">
   <th><a href="opam-solver"><code>src/solver</code></a></th>
@@ -198,6 +202,8 @@ td.sublib {
   <td>Configuration options for this lib (record, global reference, setter, initialisation)</td></tr>
 <tr><th><a href="opam-solver/OpamActionGraph">opamActionGraph.ml</a></th>
   <td>Handles graphs of actions (package changes), based on ocamlgraph</td></tr>
+<tr><th><a href="opam-solver/OpamCudfCriteria">opamCudfCriteria.ml</a></th>
+  <td>Cudf criteria helper functions (string conversion, etc.)</td></tr>
 <tr><th><a href="opam-solver/OpamCudfSolver">opamCudfSolver.ml</a></th>
   <td>Bindings to implementation of CUDF solvers, either built-in or external</td></tr>
 <tr><th><a href="opam-solver/OpamCudf">opamCudf.ml</a></th>
@@ -250,6 +256,8 @@ td.sublib {
   <td>Synchronisation and downloading of repositories and package sources</td></tr>
 <tr><th><a href="opam-state/OpamSysInteract">opamSysInteract.ml</a></th>
   <td>Interaction with system package manager, for external dependencies management</td></tr>
+<tr><th><a href="opam-state/OpamEmbedCygwinSetup">opamEmbedCygwinSetup.ml</a></th>
+  <td>(generated) Contains the Cygwin setup.exe binary if specified in the configure</td></tr>
 <tr><th><a href="opam-state/OpamSpdxList">opamSpdxList.ml</a></th>
   <td>(generated) SPDX short IDs licenses list, used for linting packages</td></tr>
 

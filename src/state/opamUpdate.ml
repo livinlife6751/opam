@@ -21,8 +21,7 @@ let slog = OpamConsole.slog
 let eval_redirect gt repo repo_root =
   if repo.repo_url.OpamUrl.backend <> `http then None else
   let redirect =
-    OpamRepositoryPath.repo repo_root
-    |> OpamFile.Repo.safe_read
+    snd (OpamRepositoryRoot.delayed_read_repo repo_root) ()
     |> OpamFile.Repo.redirect
   in
   let redirect = List.fold_left (fun acc (redirect, filter) ->
@@ -50,15 +49,69 @@ let eval_redirect gt repo repo_root =
 let repository rt repo =
   let max_loop = 10 in
   let gt = rt.repos_global in
-  if repo.repo_url = OpamUrl.empty then Done (fun rt -> rt) else
-  let repo_root = OpamRepositoryState.get_repo_root rt repo in
+  if repo.repo_url = OpamUrl.empty then Done None else
+  let get_repo_root () =
+    let tgz =
+      OpamRepositoryRoot.Tgz.Path.root rt.repos_global.root repo.repo_name
+    in
+    let dir =
+      OpamRepositoryRoot.Dir.Path.root rt.repos_global.root repo.repo_name
+    in
+    let reporoot_tgz = OpamRepositoryRoot.Tgz tgz in
+    let reporoot_dir = OpamRepositoryRoot.Dir dir in
+    let fail kind e =
+      OpamStd.Exn.fatal e;
+      Printf.ksprintf failwith
+        "Failed to regenerate local repository %s: %s"
+        kind (Printexc.to_string e)
+    in
+    let tgz_to_dir () =
+      log "repository format change: from archive to directory (%s)"
+        (OpamRepositoryRoot.Dir.to_string dir);
+      OpamProcess.Job.finally (fun () ->
+          OpamRepositoryRoot.remove reporoot_tgz) @@ fun () ->
+      OpamRepositoryRoot.extract_in_job tgz dir @@+ function
+      | Some e -> fail "directory" e
+      | None -> Done reporoot_dir
+    in
+    let dir_to_tgz () =
+      log "repository format change: from directory to archive (%s)"
+        (OpamRepositoryRoot.to_string reporoot_tgz);
+      OpamRepositoryRoot.make_tar_gz tgz dir;
+      OpamRepositoryRoot.Dir.remove dir
+    in
+    let tgz_exists = OpamRepositoryRoot.exists reporoot_tgz in
+    let dir_exists = OpamRepositoryRoot.exists reporoot_dir in
+    let tgz_exists, dir_exists =
+      (* shouldn't happen, we remove both and do a full update *)
+      if tgz_exists && dir_exists then
+        (log "repository exists as directory and archive, removing both";
+         OpamRepositoryRoot.remove_both rt.repos_global.root repo.repo_name;
+         false, false)
+      else tgz_exists, dir_exists
+    in
+    match repo.repo_url.backend with
+    | `http ->
+      if dir_exists then dir_to_tgz ();
+      Done reporoot_tgz
+    | `rsync when OpamRepositoryConfig.(!r.repo_tarring) ->
+      if dir_exists then dir_to_tgz ();
+      Done reporoot_tgz
+    | `rsync
+    | #OpamUrl.version_control ->
+      (* We shouldn't have the case tgz & vcs because it comes from a
+         'opam set-url' and it is wiped before update call *)
+      if tgz_exists then tgz_to_dir () else Done reporoot_dir
+  in
+  (* We transform the repository first if needed, then do the update and apply it *)
+  get_repo_root () @@+ fun repo_root ->
   (* Recursively traverse redirection links, but stop after 10 steps or if
      we cycle back to the initial repo. *)
-  let rec job r n =
+  let rec job r redirect n =
     if n = 0 then
       (OpamConsole.warning "%s: Too many redirections, stopping."
          (OpamRepositoryName.to_string repo.repo_name);
-       Done r)
+       Done (r, `No_changes))
     else
     let text =
       OpamProcess.make_command_text ~color:`blue
@@ -66,15 +119,17 @@ let repository rt repo =
         OpamUrl.(string_of_backend repo.repo_url.backend)
     in
     OpamProcess.Job.with_text text @@
-    OpamRepository.update r repo_root @@+ fun () ->
+    OpamRepository.update r repo_root @@+ fun has_changes ->
+    let has_changes = if redirect then `Changes [] else has_changes in
     if n <> max_loop && r = repo then
       (OpamConsole.warning "%s: Cyclic redirections, stopping."
          (OpamRepositoryName.to_string repo.repo_name);
-       Done r)
+       Done (r, has_changes))
     else match eval_redirect gt r repo_root with
-      | None -> Done r
+      | None -> Done (r, has_changes)
       | Some (new_url, f) ->
-        OpamFilename.cleandir repo_root;
+        OpamRepositoryRoot.remove repo_root;
+        OpamRepositoryRoot.make_empty repo_root;
         let reason = match f with
           | None   -> ""
           | Some f -> Printf.sprintf " (%s)" (OpamFilter.to_string f) in
@@ -84,68 +139,111 @@ let repository rt repo =
           (OpamConsole.colorise `bold "permanently")
           (OpamUrl.to_string new_url)
           reason;
-        job { r with repo_url = new_url } (n-1)
+        job { r with repo_url = new_url } true (n-1)
   in
-  job repo max_loop @@+ fun repo ->
-  let repo_file_path = OpamRepositoryPath.repo repo_root in
-  if not (OpamFile.exists repo_file_path) then
+  job repo false max_loop @@+ fun (repo, has_changes) ->
+  let repo_exists, repo_file = OpamRepositoryRoot.delayed_read_repo repo_root in
+  if not repo_exists then
     OpamConsole.warning
       "The repository '%s' at %s doesn't have a 'repo' file, and might not be \
        compatible with this version of opam."
       (OpamRepositoryName.to_string repo.repo_name)
       (OpamUrl.to_string repo.repo_url);
-  let repo_file = OpamFile.Repo.safe_read repo_file_path in
-  let repo_file = OpamFile.Repo.with_root_url repo.repo_url repo_file in
-  let repo_vers =
-    OpamStd.Option.default OpamFile.Repo.format_version @@
-    OpamFile.Repo.opam_version repo_file
-  in
-  if not OpamFormatConfig.(!r.skip_version_checks) &&
-     OpamVersion.compare repo_vers OpamVersion.current > 0 then
-    Printf.ksprintf failwith
-      "repository format version is %s, and this is only opam %s"
-      (OpamVersion.to_string repo_vers)
-      (OpamVersion.to_string OpamVersion.current);
-  List.iter (fun (msg, filter) ->
-      if OpamFilter.opt_eval_to_bool (OpamPackageVar.resolve_global gt) filter
-      then
-        OpamConsole.formatted_msg ~indent:4 "%s (at %s): %s\n"
-          (OpamConsole.colorise' [`bold;`green]
-             (OpamRepositoryName.to_string repo.repo_name))
-          (OpamConsole.colorise `bold (OpamUrl.to_string repo.repo_url))
-          msg)
-    (OpamFile.Repo.announce repo_file);
-  OpamFilename.make_tar_gz_job
-    (OpamRepositoryPath.tar gt.root repo.repo_name)
-    repo_root
-  @@+ function
-  | Some e ->
-    OpamStd.Exn.fatal e;
-    Printf.ksprintf failwith
-      "Failed to regenerate local repository archive: %s"
-      (Printexc.to_string e)
-  | None ->
-    let opams =
-      OpamRepositoryState.load_opams_from_dir repo.repo_name repo_root
+  match has_changes with
+  | `No_changes ->
+    log "Repository did not change: nothing to do.";
+    Done None
+  | `Changes diffs ->
+    log "Repository has new changes";
+    let repo_file = repo_file () in
+    let repo_file = OpamFile.Repo.with_root_url repo.repo_url repo_file in
+    let repo_vers =
+      OpamStd.Option.default OpamFile.Repo.format_version @@
+      OpamFile.Repo.opam_version repo_file
     in
-    let local_dir = OpamRepositoryPath.root gt.root repo.repo_name in
-    if OpamFilename.exists_dir local_dir then
-      (* Mark the obsolete local directory for deletion once we complete: it's
-         no longer needed once we have a tar.gz *)
-      Hashtbl.add rt.repos_tmp repo.repo_name (lazy local_dir);
-    Done (
-      (* Return an update function to make parallel execution possible *)
-      fun rt ->
-        { rt with
-          repositories =
-            OpamRepositoryName.Map.add repo.repo_name repo rt.repositories;
-          repos_definitions =
-            OpamRepositoryName.Map.add repo.repo_name repo_file
-              rt.repos_definitions;
-          repo_opams =
-            OpamRepositoryName.Map.add repo.repo_name opams rt.repo_opams;
-        }
-    )
+    if not OpamFormatConfig.(!r.skip_version_checks) &&
+       OpamVersion.compare repo_vers OpamVersion.current > 0 then
+      Printf.ksprintf failwith
+        "repository format version is %s, and this is only opam %s"
+        (OpamVersion.to_string repo_vers)
+        (OpamVersion.to_string OpamVersion.current);
+    List.iter (fun (msg, filter) ->
+        if OpamFilter.opt_eval_to_bool (OpamPackageVar.resolve_global gt) filter
+        then
+          OpamConsole.formatted_msg ~indent:4 "%s (at %s): %s\n"
+            (OpamConsole.colorise' [`bold;`green]
+               (OpamRepositoryName.to_string repo.repo_name))
+            (OpamConsole.colorise `bold (OpamUrl.to_string repo.repo_url))
+            msg)
+      (OpamFile.Repo.announce repo_file);
+    let opams =
+      match diffs with
+      | []  -> OpamRepositoryState.load_opams repo.repo_name repo_root
+      | diffs -> OpamRepositoryState.load_opams_from_diff repo diffs rt
+    in
+    Done (Some (
+        (* Return an update function to make parallel execution possible *)
+        fun rt ->
+          { rt with
+            repositories =
+              OpamRepositoryName.Map.add repo.repo_name repo rt.repositories;
+            repos_definitions =
+              OpamRepositoryName.Map.add repo.repo_name repo_file
+                rt.repos_definitions;
+            repo_opams =
+              OpamRepositoryName.Map.add repo.repo_name opams rt.repo_opams;
+          }
+      ))
+
+let update_sys_available_cache ?(force=false) rt =
+  if OpamConsole.disp_status_line () then
+    OpamConsole.status_line "Loading system package availability...";
+  let repos_syspkgs_available =
+    if not OpamStateConfig.(!r.depexts) then
+      None
+    else
+      let merged_depexts_opams =
+        let depexts_equal (pkgset1, filter1) (pkgset2, filter2) =
+          OpamSysPkg.Set.equal pkgset1 pkgset2 &&
+          OpamTypesBase.filter_equal filter1 filter2
+        in
+        OpamRepositoryName.Map.fold (fun _ opams acc ->
+            OpamPackage.Map.strict_union (fun x y ->
+                let depexts_x = OpamFile.OPAM.depexts x in
+                let depexts_y = OpamFile.OPAM.depexts y in
+                if OpamCompat.List.equal depexts_equal depexts_x depexts_y then
+                  x
+                else
+                  OpamFile.OPAM.with_depexts (depexts_x @ depexts_y) x)
+              acc opams)
+          rt.repo_opams OpamPackage.Map.empty
+      in
+      let repo_depexts =
+        OpamFileTools.opams_depexts merged_depexts_opams
+          ~env:(OpamPackageVar.resolve_global rt.repos_global)
+      in
+      try
+        Some (OpamSysInteract.available_packages_and_family
+                ~env:rt.repos_global.global_variables
+                rt.repos_global.config repo_depexts)
+      with Failure msg ->
+        OpamSysInteract.disable_depexts_note msg;
+        None
+  in
+  OpamConsole.clear_status ();
+  let equal () =
+    Option.equal
+      (fun (f,a) (f', a') ->
+         OpamSysInteract.equal_os_family f f'
+         && OpamSysPkg.equal_availability_mode a a')
+      rt.repos_syspkgs_available repos_syspkgs_available
+  in
+  if not force && equal () then
+    rt
+  else
+    let rt = { rt with repos_syspkgs_available } in
+    OpamRepositoryState.Cache.save rt;
+    rt
 
 let repositories rt repos =
   let command repo =
@@ -155,36 +253,57 @@ let repositories rt repos =
          OpamConsole.error "Could not update repository %S: %s"
            (OpamRepositoryName.to_string repo.repo_name)
            (match ex with Failure s -> s | ex -> Printexc.to_string ex);
-         Done ([repo], fun t -> t)) @@
+         Done ([repo], None)) @@
     fun () -> repository rt repo @@|
     fun f -> [], f
+  in
+  let merge (failed1, f1) (failed2, f2) =
+    failed1 @ failed2,
+    match f1, f2 with
+    | None, None -> None
+    | Some f1, Some f2 -> Some (f1 @* f2)
+    | Some f, None | None, Some f -> Some f
   in
   let failed, rt_update =
     OpamParallel.reduce
       ~jobs:OpamStateConfig.(!r.dl_jobs)
-      ~command
-      ~merge:(fun (failed1, f1) (failed2, f2) -> failed1 @ failed2, f1 @* f2)
-      ~nil:([], fun x -> x)
+      ~command ~merge
+      ~nil:([], None)
       ~dry_run:OpamStateConfig.(!r.dryrun)
       repos
   in
-  let rt = rt_update rt in
-  OpamRepositoryState.write_config rt;
-  OpamRepositoryState.Cache.save rt;
+  let rt =
+    match rt_update with
+    | Some rt_update ->
+      let rt = rt_update rt in
+      OpamRepositoryState.write_config rt;
+      (* Updating depexts *)
+      update_sys_available_cache ~force:true rt
+    | None ->
+      (* We do an update since the system can (rarely) change as well *)
+      match OpamRepositoryState.syspkgs_available
+              ~env:rt.repos_global.global_variables
+              rt.repos_syspkgs_available with
+      | None -> update_sys_available_cache rt
+      | Some _ -> rt
+  in
   failed, rt
 
 let fetch_dev_package url srcdir ?(working_dir=false) ?subpath nv =
   let remote_url = OpamFile.URL.url url in
   let mirrors = remote_url :: OpamFile.URL.mirrors url in
   let checksum = OpamFile.URL.checksum url in
-  log "updating %a%a" (slog OpamUrl.to_string) remote_url
-    (slog (OpamStd.Option.map_default (fun s -> " ("^s^")") "")) subpath;
+  log "updating %a" (slog (OpamUrl.to_string_w_subpath subpath)) remote_url;
+(*
+    (slog (OpamStd.Option.to_string OpamFilename.SubPath.pretty_string))
+    subpath;
+*)
   OpamRepository.pull_tree
     ~cache_dir:(OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir))
     (OpamPackage.to_string nv) srcdir checksum ~working_dir ?subpath mirrors
   @@| OpamRepository.report_fetch_result nv
 
-let pinned_package st ?version ?(working_dir=false) name =
+let pinned_package st ?version ?(autolock=false) ?(working_dir=false) name =
   log "update-pinned-package %s%a" (OpamPackage.Name.to_string name)
     (slog @@ function true -> " (working dir)" | false -> "") working_dir;
   let open OpamStd.Option.Op in
@@ -208,22 +327,20 @@ let pinned_package st ?version ?(working_dir=false) name =
        from the repo *)
     let add_extra_files srcdir file opam =
       if OpamFilename.dirname (OpamFile.filename file) <> srcdir
-      then OpamFileTools.add_aux_files ~files_subdir_hashes:true opam
+      then OpamFileTools.add_aux_files ~files_subdir_hashes:false opam
       else opam
     in
+    let locked = if autolock then OpamFile.OPAM.locked opam else None in
     (* append subpath to source dir to retrieve opam files *)
-    let srcdir_find =
-      OpamStd.Option.map_default
-        (fun x -> OpamFilename.Op.(srcdir / x)) srcdir subpath
-    in
+    let srcdir_find = OpamFilename.SubPath.(srcdir /? subpath) in
     let old_source_opam_hash, old_source_opam =
-      match OpamPinned.find_opam_file_in_source name srcdir_find with
+      match OpamPinned.find_opam_file_in_source ?locked name srcdir_find with
       | None -> None, None
-      | Some f ->
+      | Some (f, lock) ->
         Some (OpamHash.compute (OpamFile.to_string f)),
         try
           Some (OpamFile.OPAM.read f |> OpamFile.OPAM.with_name name |>
-                add_extra_files srcdir f)
+                add_extra_files srcdir f |> OpamFile.OPAM.with_locked_opt lock)
         with e -> OpamStd.Exn.fatal e; None
     in
     let repo_opam =
@@ -248,14 +365,17 @@ let pinned_package st ?version ?(working_dir=false) name =
          OpamRepository.is_dirty ?subpath url
          @@| function false -> () | true ->
            OpamConsole.note
-             "Ignoring uncommitted changes in %s%s (`--working-dir' not active)."
+             "Ignoring uncommitted changes in %s%s \
+              (`--working-dir' not specified or specified with no argument)."
              url.OpamUrl.path
-             (match subpath with None -> "" | Some s -> "/" ^ s))
+             (OpamStd.Option.to_string (fun sp ->
+                  Filename.dir_sep ^ OpamFilename.SubPath.to_string sp) subpath))
     @@+ fun () ->
     (* Do the update *)
     fetch_dev_package urlf srcdir ~working_dir ?subpath nv @@+ fun result ->
     let new_source_opam =
-      OpamPinned.find_opam_file_in_source name srcdir_find >>= fun f ->
+      OpamPinned.find_opam_file_in_source ?locked name srcdir_find
+      >>= fun (f, lock) ->
       let warns, opam_opt = OpamFileTools.lint_file f in
       let warns, opam_opt = match opam_opt with
         | Some opam0 ->
@@ -277,6 +397,7 @@ let pinned_package st ?version ?(working_dir=false) name =
          OpamConsole.errmsg "%s\n"
            (OpamFileTools.warns_to_string warns));
       opam_opt >>| OpamFile.OPAM.with_name name >>| add_extra_files srcdir f
+      >>| OpamFile.OPAM.with_locked_opt lock
     in
     let equal_opam a b =
       let cleanup_opam o =
@@ -285,7 +406,7 @@ let pinned_package st ?version ?(working_dir=false) name =
              Some ((OpamFile.OPAM.version_opt o)
                    +! (OpamSwitchState.get_package st name |> OpamPackage.version))
            with Not_found -> None)
-          +! (OpamPackage.Version.of_string "~dev")
+          +! OpamPackage.Version.default
         in
         o |> OpamFile.OPAM.with_url_opt None
         |> OpamFile.OPAM.with_version v
@@ -319,16 +440,15 @@ let pinned_package st ?version ?(working_dir=false) name =
         then OpamFile.OPAM.with_version version opam
         else opam
       in
-      List.iter (fun (file, rel_file, hash) ->
-          if OpamFilename.exists file &&
-             OpamHash.check_file (OpamFilename.to_string file) hash then
-            OpamFilename.copy ~src:file
-              ~dst:(OpamFilename.create files_dir rel_file)
-          else
+      List.iter (fun (rel_file, content, hash) ->
+          match content with
+          | Some (lazy content) when OpamHash.check_string content hash ->
+            OpamFilename.write (OpamFilename.create files_dir rel_file) content
+          | None | Some _ ->
             OpamConsole.warning "Ignoring file %s with invalid hash"
-              (OpamFilename.to_string file))
+              (OpamFilename.Base.to_string rel_file))
         (OpamFile.OPAM.get_extra_files
-           ~repos_roots:(OpamRepositoryState.get_root st.switch_repos)
+           ~get_repo_files:(OpamRepositoryState.get_repo_files st.switch_repos)
            opam);
       OpamFile.OPAM.write opam_file
         (OpamFile.OPAM.with_extra_files_opt None opam);
@@ -386,11 +506,11 @@ let pinned_package st ?version ?(working_dir=false) name =
     | Result  _, _ ->
       Done ((fun st -> st), true)
 
-let dev_package st ?working_dir nv =
+let dev_package st ?autolock ?working_dir nv =
   log "update-dev-package %a" (slog OpamPackage.to_string) nv;
   if OpamSwitchState.is_pinned st nv.name &&
      not (OpamSwitchState.is_version_pinned st nv.name) then
-    pinned_package st ~version:nv.version ?working_dir nv.name
+    pinned_package st ?autolock ~version:nv.version ?working_dir nv.name
   else
   match OpamSwitchState.url st nv with
   | None     -> Done ((fun st -> st), false)
@@ -398,18 +518,19 @@ let dev_package st ?working_dir nv =
     if (OpamFile.URL.url url).OpamUrl.backend = `http then
       Done ((fun st -> st), false)
     else
-      fetch_dev_package url (OpamSwitchState.source_dir st nv) ?working_dir nv
+      fetch_dev_package url (OpamSwitchState.source_dir st nv)
+        ?subpath:(OpamFile.URL.subpath url) ?working_dir nv
       @@| fun result ->
       (fun st -> st), match result with Result () -> true | _ -> false
 
-let dev_packages st ?(working_dir=OpamPackage.Set.empty) packages =
+let dev_packages st ?autolock ?(working_dir=OpamPackage.Set.empty) packages =
   log "update-dev-packages";
   let command nv =
     let working_dir = OpamPackage.Set.mem nv working_dir in
     OpamProcess.Job.ignore_errors
       ~default:(false, (fun st -> st), OpamPackage.Set.empty)
     @@ fun () ->
-    dev_package st ~working_dir nv @@| fun (st_update, changed) ->
+    dev_package st ?autolock ~working_dir nv @@| fun (st_update, changed) ->
     true, st_update, match changed with
     | true -> OpamPackage.Set.singleton nv
     | false -> OpamPackage.Set.empty
@@ -434,20 +555,20 @@ let dev_packages st ?(working_dir=OpamPackage.Set.empty) packages =
   (* The following is needed for pinned packages that may have changed
      version *)
   let selections1 = OpamSwitchState.selections st in
-  if selections0 <> selections1 then
+  if not (OpamTypesBase.switch_selections_equal selections0 selections1) then
     OpamFile.SwitchSelections.write
       (OpamPath.Switch.selections st.switch_global.root st.switch)
       selections1;
   success, st, updated_set
 
-let pinned_packages st ?(working_dir=OpamPackage.Name.Set.empty) names =
+let pinned_packages st ?autolock ?(working_dir=OpamPackage.Name.Set.empty) names =
   log "update-pinned-packages";
   let command name =
     let working_dir = OpamPackage.Name.Set.mem name working_dir in
     OpamProcess.Job.ignore_errors
       ~default:((fun st -> st), OpamPackage.Name.Set.empty)
     @@ fun () ->
-    pinned_package st ~working_dir name @@| fun (st_update, changed) ->
+    pinned_package st ?autolock ~working_dir name @@| fun (st_update, changed) ->
     st_update,
     match changed with
     | true -> OpamPackage.Name.Set.singleton name
@@ -474,31 +595,43 @@ let pinned_packages st ?(working_dir=OpamPackage.Name.Set.empty) names =
   OpamSwitchAction.add_to_reinstall st ~unpinned_only:false updates,
   updates
 
-let active_caches st nv =
+let active_caches st nvs =
   let global_cache = OpamFile.Config.dl_cache st.switch_global.config in
   let rt = st.switch_repos in
+  let repos_list = OpamSwitchState.repos_list st in
   let repo_cache =
-    match OpamRepositoryState.find_package_opt rt
-            (OpamSwitchState.repos_list st) nv
-    with
-    | None -> []
-    | Some (repo, _) ->
-      let repo_def = OpamRepositoryName.Map.find repo rt.repos_definitions in
-      let root_url = match OpamFile.Repo.root_url repo_def with
-        | None -> OpamSystem.internal_error "repo file of unknown origin"
-        | Some u -> u
-      in
-      OpamStd.List.filter_map (fun rel ->
-          if OpamStd.String.contains ~sub:"://" rel
-          then
-            let r = OpamUrl.parse_opt ~handle_suffix:false rel in
-            if r = None then
-              OpamConsole.warning "Invalid cache url %s, skipping" rel;
-            r
-          else Some OpamUrl.Op.(root_url / rel))
-        (OpamFile.Repo.dl_cache repo_def)
+    List.fold_left (fun (repos, caches as acc) nv ->
+        match OpamRepositoryState.find_package_opt rt repos_list nv with
+        | None -> acc
+        | Some (repo, _) ->
+          if OpamStd.List.mem OpamRepositoryName.equal repo repos then
+            acc
+          else
+            let repo_def =
+              OpamRepositoryName.Map.find repo rt.repos_definitions
+            in
+            let root_url = match OpamFile.Repo.root_url repo_def with
+              | None -> OpamSystem.internal_error "repo file of unknown origin"
+              | Some u -> u
+            in
+            let cache =
+              List.filter_map (fun rel ->
+                  if OpamStd.String.contains ~sub:"://" rel
+                  then
+                    let r = OpamUrl.parse_opt ~handle_suffix:false rel in
+                    if r = None then
+                      OpamConsole.warning "Invalid cache url %s, skipping" rel;
+                    r
+                  else Some OpamUrl.Op.(root_url / rel))
+                (OpamFile.Repo.dl_cache repo_def)
+            in
+            repo::repos, cache::caches)
+      ([],[]) nvs
+    |> snd
+    |> List.rev
+    |> List.flatten
   in
-  repo_cache @ global_cache
+  global_cache @ repo_cache
 
 let cleanup_source st old_opam_opt new_opam =
   let open OpamStd.Option.Op in
@@ -520,37 +653,66 @@ let cleanup_source st old_opam_opt new_opam =
     OpamFilename.rmdir
       (OpamSwitchState.source_dir st (OpamFile.OPAM.package new_opam))
 
-let download_package_source st nv dirname =
-  let opam = OpamSwitchState.opam st nv in
+let download_package_source_t st url nv_dirs =
   let cache_dir = OpamRepositoryPath.download_cache st.switch_global.root in
-  let cache_urls = active_caches st nv in
-
+  let cache_urls = active_caches st (List.map fst nv_dirs) in
   let fetch_source_job =
-    match OpamFile.OPAM.url opam with
-    | None   -> Done None
-    | Some u ->
-      (OpamRepository.pull_tree (OpamPackage.to_string nv)
-        ~cache_dir ~cache_urls ?subpath:(OpamFile.URL.subpath u)
-        dirname
-        (OpamFile.URL.checksum u)
-        (OpamFile.URL.url u :: OpamFile.URL.mirrors u))
-      @@| fun r -> Some r
+    match url with
+    | None -> Done None
+    | Some url ->
+      let dirnames =
+        List.map (fun (nv, dir) ->
+            OpamPackage.to_string nv, dir,
+            OpamStd.Option.Op.(OpamSwitchState.opam st nv
+                               |> OpamFile.OPAM.url
+                               >>= OpamFile.URL.subpath))
+          nv_dirs
+      in
+      let checksums = OpamFile.URL.checksum url in
+      (OpamRepository.pull_shared_tree ~cache_dir ~cache_urls
+         dirnames checksums
+         (OpamFile.URL.url url :: OpamFile.URL.mirrors url))
+      @@+ function
+      | Not_available (_s,_l) as source_result
+        when OpamFile.Config.swh_fallback st.switch_global.config ->
+        (OpamDownload.SWHID.archive_fallback url dirnames
+         @@| function
+         | Result None -> Some source_result
+         | Result (Some r) -> Some (Result r)
+         | Not_available (s,l) -> Some (Not_available (s,l))
+         | Up_to_date _ -> assert false)
+      | source_result -> Done (Some source_result)
   in
-  let fetch_extra_source_job (name, u) = function
-    | (_, Not_available _) :: _ as err -> Done err
+  let fetch_extra_source_job (nv, name, u) = function
+    | (_, _, Not_available _) :: _ as err -> Done err
     | ret ->
       (OpamRepository.pull_file_to_cache
          (OpamPackage.to_string nv ^"/"^ OpamFilename.Base.to_string name)
          ~cache_dir ~cache_urls
          (OpamFile.URL.checksum u)
          (OpamFile.URL.url u :: OpamFile.URL.mirrors u))
-      @@| fun r -> (OpamFilename.Base.to_string name, r) :: ret
+      @@| fun r -> (nv, OpamFilename.Base.to_string name, r) :: ret
   in
   fetch_source_job @@+ function
   | Some (Not_available _) as r -> Done (r, [])
   | r ->
     OpamProcess.Job.seq
       (List.map fetch_extra_source_job
-         (OpamFile.OPAM.extra_sources opam))
+         (List.flatten @@ List.map (fun (nv,_) ->
+              List.map (fun (n,u) -> nv, n, u)
+                (OpamFile.OPAM.extra_sources (OpamSwitchState.opam st nv)))
+             nv_dirs))
       []
     @@| fun r1 -> r, r1
+
+let download_shared_package_source st url nvs =
+  download_package_source_t st url
+    (List.map (fun nv -> nv, OpamSwitchState.source_dir st nv) nvs)
+
+let download_package_source st nv dirname =
+  download_package_source_t st
+    (OpamFile.OPAM.url (OpamSwitchState.opam st nv))
+    [nv, dirname]
+  @@| fun (sources, extra_sources) ->
+  sources,
+  List.map (fun (_nv, name, failure) -> name, failure) extra_sources

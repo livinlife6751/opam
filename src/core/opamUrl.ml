@@ -9,8 +9,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamStd.Op
-
 type version_control = [ `git | `darcs | `hg ]
 
 type backend = [ `http | `rsync | version_control ]
@@ -28,6 +26,17 @@ let empty = {
   path = "";
   hash = None;
 }
+
+let compare {transport; path; hash; backend} u =
+  let transport = String.compare transport u.transport in
+  if transport <> 0 then transport else
+  let path = String.compare path u.path in
+  if path <> 0 then path else
+  let hash = Option.compare String.compare hash u.hash in
+  if hash <> 0 then hash else
+    compare backend u.backend
+
+let equal u v = compare u v = 0
 
 exception Parse_error of string
 let parse_error s = raise (Parse_error s)
@@ -173,24 +182,34 @@ let parse_opt ?(quiet=false) ?backend ?handle_suffix ?from_file s =
 
 let of_string url = parse ~handle_suffix:false url
 
-let to_string url =
+let to_string_t ?subpath url =
   let hash = match url.hash with Some h -> "#" ^ h | None -> "" in
+  let subpath =
+    match subpath with
+    | Some sb ->
+      Printf.sprintf "directory /%s in "
+        (OpamFilename.SubPath.normalised_string sb)
+    | None -> ""
+  in
   match url.backend with
   | #version_control as vc ->
     let vc = string_of_backend vc in
     if url.transport = vc then (* Don't be redundant on e.g git:// protocols *)
-      Printf.sprintf "%s://%s%s" vc url.path hash
+      Printf.sprintf "%s%s://%s%s" subpath vc url.path hash
     else
-      Printf.sprintf "%s+%s://%s%s" vc url.transport url.path hash
+      Printf.sprintf "%s%s+%s://%s%s" subpath vc url.transport url.path hash
   | `rsync | `http ->
-    Printf.sprintf "%s://%s%s" url.transport url.path hash
+    Printf.sprintf "%s%s://%s%s" subpath url.transport url.path hash
+
+let to_string url = to_string_t url
+let to_string_w_subpath subpath = to_string_t ?subpath
 
 let base_url url =
   match url.transport with
   | "" -> url.path
   | tr -> Printf.sprintf "%s://%s" tr url.path
 
-let local_path = function
+let looks_like_local_path = function
   | { transport = ("file"|"path"|"local"|"rsync"); path;
       hash = _; backend = (#version_control | `rsync); }
     when looks_like_ssh_path path = None ->
@@ -199,14 +218,14 @@ let local_path = function
 
 let local_dir url =
   let open OpamStd.Option.Op in
-  local_path url >>|
+  looks_like_local_path url >>|
   OpamFilename.Dir.of_string >>= fun d ->
   if OpamFilename.exists_dir d then Some d
   else None
 
 let local_file url =
   let open OpamStd.Option.Op in
-  local_path url >>|
+  looks_like_local_path url >>|
   OpamFilename.of_string >>= fun f ->
   if OpamFilename.exists f then Some f
   else None
@@ -251,7 +270,7 @@ let root =
     { t with path}
 
 let has_trailing_slash url =
-  OpamStd.String.ends_with ~suffix:"/" url.path
+  OpamCompat.String.ends_with ~suffix:"/" url.path
 
 let to_json url = `String (to_string url)
 let of_json = function

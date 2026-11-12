@@ -58,6 +58,16 @@ module type SIG = sig
   exception Cyclic of G.V.t list list
 end
 
+let gc_compact () =
+  let get_heap () =
+    let {Gc.heap_words; _} = Gc.quick_stat () in
+    heap_words * Sys.word_size / 8 / 1024 / 1024
+  in
+  let before = get_heap () in
+  Gc.compact ();
+  let after = get_heap () in
+  log "GC compact (heap %d MB -> %d MB)" before after
+
 module Make (G : G) = struct
 
   module G = G
@@ -92,6 +102,8 @@ module Make (G : G) = struct
       default :: defined
     in
 
+    let gc_compacted = ref false in
+
     if G.has_cycle g then (
       let sccs = G.scc_list g in
       let sccs = List.filter (function _::_::_ -> true | _ -> false) sccs in
@@ -102,7 +114,7 @@ module Make (G : G) = struct
         (finished: int)
         (running: (OpamProcess.t * 'a * string option) M.t) =
       let texts =
-        OpamStd.List.filter_map (fun (_,_,t) -> t) (M.values running) in
+        List.filter_map (fun (_,_,t) -> t) (M.values running) in
       let rec limit_width acc rem_cols = function
         | [] -> List.rev acc
         | t::ts ->
@@ -214,12 +226,19 @@ module Make (G : G) = struct
               | e -> (n,e)::errors, pend)
             running ([node,error],[])
         in
-        (try List.iter (fun _ -> ignore (OpamProcess.wait_one pend)) pend
+        (try
+           List.iter (fun _ ->
+               let _ : OpamProcess.t * OpamProcess.result =
+                 OpamProcess.wait_one pend
+               in ())
+             pend
          with e -> log "%a in sub-process cleanup" (slog Printexc.to_string) e);
         (* Generate the remaining nodes in topological order *)
         let remaining =
           G.Topological.fold (fun n remaining ->
-              if M.mem n results || List.mem_assoc n errors then remaining
+              if M.mem n results
+              || OpamStd.List.mem_assoc G.V.equal n errors then
+                remaining
               else n::remaining)
             g [] in
         raise (Errors (M.keys results, List.rev errors, List.rev remaining))
@@ -239,9 +258,9 @@ module Make (G : G) = struct
              (fun pools ->
                 let slots = get_slots nslots n in
                 OpamStd.List.concat_map " " (fun (pool, jobs) ->
-                  let nslots =
-                    OpamStd.Option.of_Not_found (List.assoc pool) slots
-                  in
+                    let nslots =
+                      OpamStd.List.assoc_opt S.equal pool slots
+                    in
                   Printf.sprintf "%s/%d"
                     (match nslots with
                      | None -> "-"
@@ -262,28 +281,31 @@ module Make (G : G) = struct
             (get_slots nslots n)
         in
         run_seq_command nslots ready n cmd
-      else
-      (* Wait for a process to end *)
-      let processes =
-        M.fold (fun n (p,x,_) acc -> (p,(n,x)) :: acc) running []
-      in
-      let process, result =
-        if dry_run then
-          OpamProcess.dry_wait_one (List.map fst processes)
-        else try match processes with
-          | [p,_] -> p, OpamProcess.wait p
-          | _ -> OpamProcess.wait_one (List.map fst processes)
-        with e -> fail (fst (snd (List.hd processes))) e
-      in
-      let n,cont = List.assoc process processes in
-      log "Collected task for job %a (ret:%d)"
-        (slog (string_of_int @* V.hash)) n result.OpamProcess.r_code;
-      let next =
-        try cont result with e ->
-          OpamProcess.cleanup result;
-          fail n e in
-      OpamProcess.cleanup result;
-      run_seq_command nslots ready n next
+      else (
+        (* Wait for a process to end *)
+        if not !gc_compacted then
+          (gc_compact ();
+           gc_compacted := true);
+        let processes =
+          M.fold (fun n (p,x,_) acc -> (p,(n,x)) :: acc) running []
+        in
+        let process, result =
+          if dry_run then
+            OpamProcess.dry_wait_one (List.map fst processes)
+          else try match processes with
+            | [p,_] -> p, OpamProcess.wait p
+            | _ -> OpamProcess.wait_one (List.map fst processes)
+            with e -> fail (fst (snd (List.hd processes))) e
+        in
+        let n,cont = OpamStd.(List.assoc Compare.equal process processes) in
+        log "Collected task for job %a (ret:%d)"
+          (slog (string_of_int @* V.hash)) n result.OpamProcess.r_code;
+        let next =
+          try cont result with e ->
+            OpamProcess.cleanup result;
+            fail n e in
+        OpamProcess.cleanup result;
+        run_seq_command nslots ready n next)
     in
     let roots =
       G.fold_vertex
@@ -295,7 +317,8 @@ module Make (G : G) = struct
     r
 
   let iter ~jobs ~command ?dry_run ?pools g =
-    ignore (aux_map ~jobs ~command ?dry_run ?pools g)
+    let _ : _ M.t = aux_map ~jobs ~command ?dry_run ?pools g in
+    ()
 
   let map ~jobs ~command ?dry_run ?pools g =
     M.bindings (aux_map ~jobs ~command ?dry_run ?pools g)
@@ -355,7 +378,8 @@ module MakeGraph (X: VERTEX) = struct
   include Graph.Oper.I (PG)
 
   let transitive_closure ?reflexive g =
-    ignore (add_transitive_closure ?reflexive g)
+    let _ : g = add_transitive_closure ?reflexive g in
+    ()
 
   let build vertices edges =
     let graph = create ~size:(List.length vertices) () in
@@ -383,8 +407,12 @@ module MakeGraph (X: VERTEX) = struct
       let vertex_to_json (i, v) = (string_of_int i, X.to_json v) in
       `O (List.map vertex_to_json vertex_map) in
     let edges =
-      let vertex_inv_map = List.map (fun (i, v) -> (v, i)) vertex_map in
-      let index v = List.assoc v vertex_inv_map in
+      let module VertexMap = Map.Make(Vertex) in
+      let vertex_inv_map =
+        List.fold_left (fun m (i, v) -> VertexMap.add v i m)
+          VertexMap.empty vertex_map
+      in
+      let index v = VertexMap.find v vertex_inv_map in
       let index_to_json v = `String (string_of_int (index v)) in
       let edge_to_json edge =
         let () = E.label edge in
@@ -404,10 +432,12 @@ module MakeGraph (X: VERTEX) = struct
   let of_json : t OpamJson.decoder = function
     | `O dict ->
       begin try
-          let vertices_json = match List.assoc "vertices" dict with
+          let vertices_json =
+            match OpamStd.List.assoc String.equal "vertices" dict with
             | `O vertices -> vertices
             | _ -> raise Not_found in
-          let edges_json = match List.assoc "edges" dict with
+          let edges_json =
+            match OpamStd.List.assoc String.equal "edges" dict with
             | `A edges -> edges
             | _ -> raise Not_found in
           let vertex_map =
@@ -423,12 +453,14 @@ module MakeGraph (X: VERTEX) = struct
             let int_of_jsonstring = function
               | `String s -> (try int_of_string s with _ -> raise Not_found)
               | _ -> raise Not_found in
-            let find kj = List.assoc (int_of_jsonstring kj) vertex_map in
+            let find kj =
+              OpamStd.List.assoc Int.equal (int_of_jsonstring kj) vertex_map
+            in
             let edge_of_json = function
               | `O dict ->
-                let src = find (List.assoc "src" dict) in
+                let src = find (OpamStd.List.assoc String.equal "src" dict) in
                 let label = () in
-                let dst = find (List.assoc "dst" dict) in
+                let dst = find (OpamStd.List.assoc String.equal "dst" dict) in
                 E.create src label dst
               | _ -> raise Not_found
             in List.map edge_of_json edges_json
@@ -464,7 +496,7 @@ let iter ~jobs ~command ?dry_run l =
   let a = Array.of_list l in
   let g = flat_graph_of_array a in
   let command ~pred:_ i = command a.(i) in
-  ignore (IntGraph.Parallel.iter ~jobs ~command ?dry_run g)
+  IntGraph.Parallel.iter ~jobs ~command ?dry_run g
 
 let map ~jobs ~command ?dry_run l =
   let a = Array.of_list l in

@@ -11,7 +11,7 @@
 open OpamTypes
 open OpamPackage.Set.Op
 
-let env ~with_test ~with_doc ~dev nv v =
+let env nv v =
   match OpamVariable.Full.scope v,
         OpamVariable.(to_string (Full.variable v))
   with
@@ -22,21 +22,22 @@ let env ~with_test ~with_doc ~dev nv v =
   | OpamVariable.Full.Global, "opam-version" ->
     Some (S OpamVersion.(to_string current))
   | OpamVariable.Full.Global, "with-test" ->
-    Some (B with_test)
+    Some (B false)
   | OpamVariable.Full.Global, "dev" ->
-    Some (B dev)
+    Some (B false)
   | OpamVariable.Full.Global, "with-doc" ->
-    Some (B with_doc)
+    Some (B false)
+  | OpamVariable.Full.Global, "with-dev-setup" ->
+    Some (B false)
   | _ -> None
 
-let get_universe ~with_test ~with_doc ~dev opams =
-  let env = env ~with_test ~with_doc ~dev in
+let get_universe opams =
   let packages = OpamPackage.keys opams in
   {
     u_packages = packages;
     u_action = Query;
     u_installed = OpamPackage.Set.empty;
-    u_available = packages;
+    u_available = lazy packages;
     u_depends =
       OpamPackage.Map.mapi
         (fun nv o ->
@@ -57,7 +58,6 @@ let get_universe ~with_test ~with_doc ~dev opams =
         opams;
     u_installed_roots = OpamPackage.Set.empty;
     u_pinned = OpamPackage.Set.empty;
-    u_base = OpamPackage.Set.empty;
     u_invariant = OpamFormula.Empty;
     u_attrs = [];
     u_reinstall = OpamPackage.Set.empty;
@@ -110,9 +110,9 @@ let cycle_check univ =
   in
   (* conflicts break cycles *)
   let conflicts =
-    Algo.Defaultgraphs.PackageGraph.conflict_graph cudf_univ
+    Dose_algo.Defaultgraphs.PackageGraph.conflict_graph cudf_univ
   in
-  let module CGraph = Algo.Defaultgraphs.PackageGraph.UG in
+  let module CGraph = Dose_algo.Defaultgraphs.PackageGraph.UG in
   CGraph.iter_edges (fun nv1 nv2 ->
       OpamCudf.Graph.remove_edge graph nv1 nv2;
       OpamCudf.Graph.remove_edge graph nv2 nv1)
@@ -127,7 +127,7 @@ let cycle_check univ =
         let univ = Cudf.load_universe pkgs in
         let g = OpamCudf.Graph.of_universe univ in
         let conflicts =
-          Algo.Defaultgraphs.PackageGraph.conflict_graph univ
+          Dose_algo.Defaultgraphs.PackageGraph.conflict_graph univ
         in
         (* Simplify the graph by merging all equivalent versions of each
            package *)
@@ -355,7 +355,10 @@ let get_obsolete univ opams =
   let revdeps_map = (* pkg -> set *)
     PkgMap.fold (fun pkg ->
         PkgSet.fold (fun d ->
-            PkgMap.update d (PkgSet.add pkg) PkgSet.empty))
+            PkgMap.update d
+              (function
+                | None -> Some (PkgSet.singleton pkg)
+                | Some s -> Some (PkgSet.add pkg s))))
       simple_deps PkgMap.empty
   in
   let aggregates =
@@ -404,11 +407,11 @@ let get_obsolete univ opams =
       if is_obsolete then acc ++ pkgs else acc)
     aggregates PkgSet.empty
 
-let check ~quiet ~installability ~cycles ~obsolete ~ignore_test repo_root =
+let check ~quiet ~installability ~cycles ~obsolete repo_root =
   let pkg_prefixes = OpamRepository.packages_with_prefixes repo_root in
   let opams =
     OpamPackage.Map.fold (fun nv prefix acc ->
-        let opam_file = OpamRepositoryPath.opam repo_root prefix nv in
+        let opam_file = OpamRepositoryRoot.Dir.Path.opam repo_root prefix nv in
         match OpamFile.OPAM.read_opt opam_file with
         | Some o -> OpamPackage.Map.add nv o acc
         | None ->
@@ -418,11 +421,7 @@ let check ~quiet ~installability ~cycles ~obsolete ~ignore_test repo_root =
       pkg_prefixes
       OpamPackage.Map.empty
   in
-  let univ =
-    get_universe
-      ~with_test:(not ignore_test) ~with_doc:(not ignore_test) ~dev:false
-      opams
-  in
+  let univ = get_universe opams in
 
   (* Installability check *)
   let unav_roots, uninstallable =

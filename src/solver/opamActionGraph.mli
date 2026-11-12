@@ -19,7 +19,8 @@ module type ACTION = sig
   include OpamParallel.VERTEX with type t = package action
   val to_string: [< t ] -> string
   val to_aligned_strings:
-    ?append:(package -> string) -> [< t ] list -> string list list
+    ?explicit:bool -> ?append:(package -> string) -> [< t ] list ->
+    string list list
   module Set: OpamStd.SET with type elt = package action
   module Map: OpamStd.MAP with type key = package action
 end
@@ -43,12 +44,14 @@ module type SIG = sig
       The argument [noop_remove] is a function that should return `true`
       for package where the `remove` action is known not to modify the
       filesystem (such as `conf-*` package).
-      The argument [sources_needed] is a function that should return `true`
-      for packages that require fetching sources (packages that do not
-      require it are typically up-to-date pins or "in-place" builds). *)
+      The argument [sources_needed p] is a function that should return packages
+      list that require fetching same shared source (singleton when no source
+      is shared), and an empty list if no fetching is required for that package
+      (packages that do not require it are typically up-to-date pins or
+      "in-place" builds). *)
   val explicit:
     ?noop_remove:(package -> bool) ->
-    sources_needed:(package -> bool) ->
+    sources_needed:(package -> package list) ->
     t -> t
 
   (** Folds on all recursive successors of the given action, including itself,
@@ -63,5 +66,13 @@ module Make (A: ACTION) : SIG with type package = A.package
 val action_strings:
   ?utf8:bool -> 'a action -> string
 
+val symbol_of_action: 'a action -> string
+
+val name_of_action: 'a action -> string
+
 (** Colorise string according to the action *)
 val action_color: 'a action -> string -> string
+
+(** Returns a noun corresponding to the action name, singular and plural
+    forms *)
+val noun_of_action: 'a action -> string * string

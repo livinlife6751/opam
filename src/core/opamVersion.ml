@@ -22,6 +22,7 @@ let of_json = function
 | _ -> None
 
 let compare v w = OpamVersionCompare.compare v w
+let equal v w = compare v w = 0
 
 module O = struct
   type t = string
@@ -35,7 +36,7 @@ module Set = OpamStd.Set.Make(O)
 
 module Map = OpamStd.Map.Make(O)
 
-let current_raw = STRINGIFY(VERSION)
+let current_raw = OpamVersionInfo.version
 
 let current = of_string current_raw
 
@@ -80,6 +81,9 @@ let git () =
   match !gitversion with
   | None   -> None
   | Some v -> Some (of_string v)
+
+let is_dev_version () =
+  (!gitversion <> None)
 
 let full () =
   let git_version = match git () with

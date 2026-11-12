@@ -16,7 +16,7 @@ let select_packages atom_locs st =
     OpamAuxCommands.simulate_autopin ~quiet:true ~for_view:true st atom_locs
   in
   let packages =
-    OpamFormula.packages_of_atoms OpamPackage.Set.Op.(st.packages ++ st.installed) atoms
+    OpamFormula.packages_of_atoms st.packages atoms
   in
   if OpamPackage.Set.is_empty packages then
     OpamConsole.error_and_exit `Not_found "No package matching %s"
@@ -24,7 +24,7 @@ let select_packages atom_locs st =
   else
     (let names = OpamPackage.names_of_packages packages in
      let missing =
-       OpamStd.List.filter_map (fun (n,vc) ->
+       List.filter_map (fun (n,vc) ->
            if OpamPackage.Name.Set.mem n names then None
            else Some (n,vc)) atoms
      in
@@ -64,6 +64,7 @@ let select_packages atom_locs st =
                  >>| OpamFile.URL.url
                  >>= OpamUrl.local_dir
                  >>= OpamPinned.find_opam_file_in_source name
+                 >>| fst
                  >>| OpamFile.OPAM.read
                with
                | Some opam ->
@@ -79,25 +80,28 @@ let select_packages atom_locs st =
                | None -> OpamSwitchState.opam st nv
              else OpamSwitchState.opam st nv
            in
-           let atoms =
-             OpamFormula.atoms
+           let cnf =
+             OpamFormula.to_cnf
                (OpamPackageVar.all_depends ~depopts:false st opam)
            in
            let missing =
-             List.filter (fun (n,vc) ->
-                 let pkgs = (OpamPackage.packages_of_name st.installed n) in
-                 OpamPackage.Set.is_empty pkgs ||
-                 OpamPackage.Set.fold (fun nv satisf ->
-                     satisf || not (OpamFormula.check (n,vc) nv))
-                   pkgs false)
-               atoms
+             let installed_pkgs = OpamPackage.Set.union st.installed packages in
+             List.filter (fun disj ->
+                 List.for_all (fun (n,vc) ->
+                     let pkgs = OpamPackage.packages_of_name installed_pkgs n in
+                     OpamPackage.Set.is_empty pkgs ||
+                     not (OpamPackage.Set.exists (OpamFormula.check (n,vc)) pkgs))
+                   disj)
+               cnf
            in
            if missing <> [] then
              (OpamConsole.error
                 "Skipping %s, dependencies are not satisfied in this switch, \
                  not installed packages are:\n%s"
                 (OpamPackage.to_string nv)
-                (OpamStd.Format.itemize OpamFormula.string_of_atom missing);
+                (OpamStd.Format.itemize
+                   (OpamStd.List.concat_map " | " OpamFormula.string_of_atom)
+                   missing);
               acc)
            else
              OpamPackage.Set.add nv acc)
@@ -121,22 +125,17 @@ let get_git_url url nv dir =
          (OpamUrl.to_string u);
      Some u)
   | _ ->
-    (OpamConsole.error "Can't retrieve remote informations for %s"
+    (OpamConsole.error "Remote branch not found for %s"
        (OpamPackage.to_string nv);
      None)
 
-let lock_opam ?(only_direct=false) st opam =
+let lock_opam ~only_direct ~keep_local st opam =
   let nv = OpamFile.OPAM.package opam in
-  let univ =
-    OpamSwitchState.universe st
-      ~requested:(OpamPackage.Name.Set.singleton nv.name)
-      Query
-  in
   (* Depends *)
   let all_depends =
-    OpamSolver.dependencies
-      ~depopts:true ~build:true ~post:true ~installed:true
-      univ (OpamPackage.Set.singleton nv) |>
+    OpamSwitchState.dependencies
+      ~depopts:true ~build:true ~post:true ~installed:true ~unavailable:false
+      st (OpamPackage.Set.singleton nv) |>
     OpamPackage.Set.remove nv
   in
   let depends =
@@ -151,17 +150,17 @@ let lock_opam ?(only_direct=false) st opam =
     else all_depends
   in
   let map_of_set x set =
-    OpamPackage.Map.of_list (List.map (fun nv -> nv, x)
-                               (OpamPackage.Set.elements set))
+    OpamPackage.Set.fold (fun nv acc -> OpamPackage.Map.add nv x acc)
+      set OpamPackage.Map.empty
   in
   let depends_map = map_of_set `version depends in
-  (* others: dev, test, doc *)
+  (* others: dev, test, doc, dev-setup *)
   let open OpamPackage.Set.Op in
-  let select ?(build=false) ?(test=false) ?(doc=false) ?(dev=false)
-      ?(default=false) ?(post=false) () =
+  let select ?(build=false) ?(test=false) ?(doc=false) ?(dev_setup=false)
+      ?(dev=false) ?(default=false) ?(post=false) () =
     OpamFormula.packages st.packages
       (OpamFilter.filter_deps
-         ~build ~test ~doc ~dev ~default ~post
+         ~build ~test ~doc ~dev ~dev_setup ~default ~post
          (OpamFile.OPAM.depends opam))
   in
   let default = select () in
@@ -177,14 +176,18 @@ let lock_opam ?(only_direct=false) st opam =
       let depends_map = map_of_set `other installed in
       if only_direct then depends_map
       else
-        (OpamSolver.dependencies
+        (OpamSwitchState.dependencies
            ~depopts:false ~build:true ~post:true ~installed:true
-           univ installed
+           ~unavailable:false st installed
          -- all_depends)
         |> map_of_set (`other_dep typ)
-        |> OpamPackage.Map.union (fun _v _o -> `other_dep typ) depends_map
+        |> OpamPackage.Map.strict_union (fun _v _o -> `other_dep typ) depends_map
     else
-      (OpamConsole.msg "Not all dependencies are satisfied, won't include them\n";
+      (OpamConsole.msg "Not all dependencies of %s are satisfied, not \
+                        including these: %s\n"
+         (OpamPackage.to_string nv)
+         (OpamStd.List.concat_map ", " OpamPackage.Name.to_string
+            (OpamPackage.Name.Set.elements uninstalled));
        OpamPackage.Map.empty)
   in
   (* variables are set here as a string *)
@@ -193,6 +196,9 @@ let lock_opam ?(only_direct=false) st opam =
   in
   let test_depends_map = select_depends "with-test" (select ~test:true ()) in
   let doc_depends_map = select_depends "with-doc" (select ~doc:true ()) in
+  let dev_setup_depends_map =
+    select_depends "with-dev-setup" (select ~dev_setup:true ())
+  in
   let depends =
     let f a b =
       match a,b with
@@ -204,9 +210,10 @@ let lock_opam ?(only_direct=false) st opam =
     in
     OpamPackage.Map.(
       depends_map
-      |> union f dev_depends_map
-      |> union f test_depends_map
-      |> union f doc_depends_map
+      |> strict_union f dev_depends_map
+      |> strict_union f test_depends_map
+      |> strict_union f doc_depends_map
+      |> strict_union f dev_setup_depends_map
     )
   in
   (* formulas *)
@@ -252,8 +259,8 @@ let lock_opam ?(only_direct=false) st opam =
   let all_depopts =
     OpamFormula.packages st.packages
       (OpamFilter.filter_deps
-         ~build:true ~test:true ~doc:true ~dev:true ~default:true ~post:false
-         (OpamFile.OPAM.depopts opam))
+         ~build:true ~test:true ~doc:true ~dev_setup:true ~default:true
+         ~post:false (OpamFile.OPAM.depopts opam))
   in
   let installed_depopts = OpamPackage.Set.inter all_depopts st.installed in
   let uninstalled_depopts =
@@ -268,15 +275,33 @@ let lock_opam ?(only_direct=false) st opam =
          (OpamPackage.Name.Set.elements uninstalled_depopts))
   in
   let pin_depends =
+    let pin_depends =
+      let is_pin nv = OpamSwitchState.is_pinned st nv.name in
+      let pins map set =
+        OpamPackage.Map.fold (fun nv _ set ->
+            if is_pin nv then OpamPackage.Set.add nv set else set)
+          map set
+      in
+      OpamPackage.Set.filter is_pin all_depends
+      |> pins dev_depends_map
+      |> pins test_depends_map
+      |> pins doc_depends_map
+      |> pins dev_setup_depends_map
+    in
     OpamPackage.Set.fold (fun nv acc ->
-        if not (OpamSwitchState.is_pinned st nv.name) then acc else
         match OpamSwitchState.primary_url st nv with
         | None -> acc
         | Some u ->
           match OpamUrl.local_dir u with
+          | Some _ when keep_local ->
+            OpamConsole.note
+              "Dependency %s is pinned to local target %s, keeping it."
+              (OpamPackage.to_string nv) (OpamUrl.to_string u);
+            (nv, u) :: acc
           | Some d ->
             let local_warn () =
-              OpamConsole.warning "Dependency %s is pinned to local target %s"
+              OpamConsole.warning
+                "Dependency %s is pinned to local target %s, skipping"
                 (OpamPackage.to_string nv) (OpamUrl.to_string u);
               acc
             in
@@ -290,11 +315,12 @@ let lock_opam ?(only_direct=false) st opam =
                 | None -> local_warn ())
              | _ -> local_warn ())
           | None -> (nv, u) :: acc)
-      all_depends []
+      pin_depends []
     |> List.rev
   in
-  opam |>
-  OpamFile.OPAM.with_depopts OpamFormula.Empty |>
-  OpamFile.OPAM.with_depends depends_formula |>
-  OpamFile.OPAM.with_conflicts conflicts |>
-  OpamFile.OPAM.with_pin_depends pin_depends
+  opam
+  |> OpamFile.OPAM.with_depopts OpamFormula.Empty
+  |> OpamFile.OPAM.with_depends depends_formula
+  |> OpamFile.OPAM.with_conflicts conflicts
+  |> OpamFile.OPAM.with_pin_depends pin_depends
+  |> OpamFile.OPAM.with_url_opt None

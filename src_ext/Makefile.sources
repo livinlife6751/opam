@@ -1,78 +1,70 @@
-URL_cppo = https://github.com/ocaml-community/cppo/releases/download/v1.6.7/cppo-v1.6.7.tbz
-MD5_cppo = 65c668196c3dabf34d9e887952e5bbb4
+URL_cppo = https://github.com/ocaml-community/cppo/archive/v1.8.0.tar.gz
+MD5_cppo = a197cb393b84f6b30e0ff55080ac429b
 
-$(call PKG_SAME,cppo)
+URL_extlib = https://github.com/ygrek/ocaml-extlib/releases/download/1.8.0/extlib-1.8.0.tar.gz
+MD5_extlib = 43fb3bf2989671af1769147b1171d080
 
-URL_extlib = https://ygrek.org/p/release/ocaml-extlib/extlib-1.7.7.tar.gz
-MD5_extlib = 2c620993aecd4b31b3a362b21b55dd94
+URL_base64 = https://github.com/mirage/ocaml-base64/releases/download/v3.5.2/base64-3.5.2.tbz
+MD5_base64 = 28a7acd8e8f90ab128b51ee8c0ffc355
 
-$(call PKG_SAME,extlib)
+URL_re = https://github.com/ocaml/ocaml-re/archive/refs/tags/1.14.0.tar.gz
+MD5_re = 03f4a83100cb9229a796b85c698076e1
 
-URL_re = https://github.com/ocaml/ocaml-re/releases/download/1.9.0/re-1.9.0.tbz
-MD5_re = bddaed4f386a22cace7850c9c7dac296
+URL_ocamlgraph = https://github.com/backtracking/ocamlgraph/releases/download/2.2.0/ocamlgraph-2.2.0.tbz
+MD5_ocamlgraph = 3195404bc06fce560d5336d7614028bc
 
-$(call PKG_SAME,re)
+URL_cudf = https://gitlab.com/irill/cudf/-/archive/v0.11-rc1/cudf-v0.11-rc1.tar.gz
+MD5_cudf = aedc2a222085bd8284bf2b8f91bbeae6
 
-URL_cmdliner = http://erratique.ch/software/cmdliner/releases/cmdliner-1.0.4.tbz
-MD5_cmdliner = fe2213d0bc63b1e10a2d0aa66d2fc8d9
+URL_dose3 = https://gitlab.com/irill/dose3/-/archive/7.0.0/dose3-7.0.0.tar.gz
+MD5_dose3 = bc99cbcea8fca29dca3ebbee54be45e1
 
-$(call PKG_SAME,cmdliner)
+URL_mccs = https://github.com/ocaml-opam/ocaml-mccs/releases/download/1.1+19/mccs-1.1+19.tar.gz
+MD5_mccs = f852da188bf7de20e64be2fce0e48e0a
 
-URL_ocamlgraph = https://github.com/backtracking/ocamlgraph/releases/download/2.0.0/ocamlgraph-2.0.0.tbz
-MD5_ocamlgraph = 2d07fcf3501e1d4997c03fa94cea22f0
+URL_opam-0install-cudf = https://github.com/ocaml-opam/opam-0install-cudf/releases/download/v0.5.0/opam-0install-cudf-0.5.0.tar.gz
+MD5_opam-0install-cudf = 75419722aa839f518a25cae1b3c6efd4
 
-$(call PKG_SAME,ocamlgraph)
+URL_0install-solver = https://github.com/0install/0install/releases/download/v2.18/0install-2.18.tbz
+MD5_0install-solver = 030edc9b1d3676c06d51397ffb5a737d
 
-URL_cudf = https://gforge.inria.fr/frs/download.php/36602/cudf-0.9.tar.gz
-MD5_cudf = a4c0e652e56e74c7b388a43f9258d119
+URL_opam-file-format = https://github.com/ocaml/opam-file-format/releases/download/2.2.0/opam-file-format-2.2.0.tar.gz
+MD5_opam-file-format = 5b65ea84fa2e60e89c2c9f2ca3203e31
 
-$(call PKG_SAME,cudf)
-
-URL_dose3 = https://gforge.inria.fr/frs/download.php/file/36063/dose3-5.0.1.tar.gz
-MD5_dose3 = e7d4b1840383c6732f29a47c08ba5650
-
-$(call PKG_SAME,dose3)
-
-URL_mccs = https://github.com/AltGr/ocaml-mccs/archive/1.1+12.tar.gz
-MD5_mccs = 7086eefb41e631a63e26b23577cef582
-
-$(call PKG_SAME,mccs)
-
-URL_opam-file-format = https://github.com/ocaml/opam-file-format/archive/2.1.2.tar.gz
-MD5_opam-file-format = f16ed774167fc1881876b8185087e0ab
-
-$(call PKG_SAME,opam-file-format)
-
-URL_result = https://github.com/janestreet/result/releases/download/1.5/result-1.5.tbz
-MD5_result = 1b82dec78849680b49ae9a8a365b831b
-
-$(call PKG_SAME,result)
-
-# NB If minimum OCaml version for Dune changes, update DUNE_SECONDARY in configure.ac
-URL_dune-local = https://github.com/ocaml/dune/releases/download/2.8.4/dune-2.8.4.tbz
-MD5_dune-local = 3b6044c7173fe5079c09341fc5373077
-
-$(call PKG_SAME,dune-local)
-
-URL_PKG_findlib = http://download.camlcity.org/download/findlib-1.9.1.tar.gz
-MD5_PKG_findlib = 65e6dc9b305ccbed1267275fe180f538
-
-URL_PKG_ocamlbuild = https://github.com/ocaml/ocamlbuild/archive/0.14.0.tar.gz
-MD5_PKG_ocamlbuild = a7bf2fe594cd16907807c756b14d501f
-
-URL_PKG_topkg = http://erratique.ch/software/topkg/releases/topkg-1.0.3.tbz
-MD5_PKG_topkg = e285f7a296d77ee7d831ba9a6bfb396f
-
-URL_seq = https://github.com/c-cube/seq/archive/0.2.2.tar.gz
-MD5_seq = 9033e02283aa3bde9f97f24e632902e3
-
-# This is necessary as long as a patch is used to rename seq.ml and seq.mli
-ensure-seq-patched.stamp: seq.stamp
-	rm -f seq/src/seq.ml seq/src/seq.mli
-
-$(call PKG_SAME,seq)
+include Makefile.dune
 
 URL_stdlib-shims = https://github.com/ocaml/stdlib-shims/releases/download/0.3.0/stdlib-shims-0.3.0.tbz
 MD5_stdlib-shims = 09db7af8b4a3a96048a61cb6ae2496ef
 
-$(call PKG_SAME,stdlib-shims)
+URL_spdx_licenses = https://github.com/kit-ty-kate/spdx_licenses/releases/download/v1.5.0/spdx_licenses-1.5.0.tar.gz
+MD5_spdx_licenses = 1071f6377ebc872404e3ee0d03838299
+
+URL_uutf = https://erratique.ch/software/uutf/releases/uutf-1.0.4.tbz
+MD5_uutf = 19c8e6d8ae6c70116495a7d44ac75f3d
+
+URL_jsonm = https://erratique.ch/software/jsonm/releases/jsonm-1.0.2.tbz
+MD5_jsonm = bb21574ddd58543120430ff306b462e6
+
+URL_sha = https://github.com/djs55/ocaml-sha/releases/download/v1.15.4/sha-1.15.4.tbz
+MD5_sha = 08bc953d9a26380bc220b05d680791fb
+
+URL_swhid_core = https://github.com/OCamlPro/swhid_core/archive/refs/tags/0.1.tar.gz
+MD5_swhid_core = 77d88d4b1d96261c866f140c64d89af8
+
+URL_menhir = https://gitlab.inria.fr/fpottier/menhir/-/archive/20260209/archive.tar.gz
+MD5_menhir = e993231085db95ab011ffe0cd606d9dd
+
+URL_patch = https://github.com/hannesm/patch/releases/download/v3.1.2/patch-3.1.2.tbz
+MD5_patch = 64838d4076de9825d2046e00d0684789
+
+URL_checkseum = https://github.com/mirage/checkseum/releases/download/v0.5.4/checkseum-0.5.4.tbz
+MD5_checkseum = 7759bc5b0a465d4836ed299c79639c41
+
+URL_optint = https://github.com/mirage/optint/releases/download/v0.3.0/optint-0.3.0.tbz
+MD5_optint = 46cc1b8bd00872529ac01407f908d389
+
+URL_decompress = https://github.com/mirage/decompress/releases/download/v1.6.1/decompress-1.6.1.tbz
+MD5_decompress = 2abfce01abf29c4f1ebe68be0a76559d
+
+URL_tar = https://github.com/mirage/ocaml-tar/releases/download/v3.5.0/tar-3.5.0.tbz
+MD5_tar = 06026fdb95a4a6c85a19177887351175

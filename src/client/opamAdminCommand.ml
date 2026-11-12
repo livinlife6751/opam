@@ -12,17 +12,38 @@
 open OpamTypes
 open OpamProcess.Job.Op
 open OpamStateTypes
-open Cmdliner
+open OpamCmdliner
 
-type command = unit Cmdliner.Term.t * Cmdliner.Term.info
+type command = unit OpamCmdliner.Term.t * OpamCmdliner.Cmd.info
 
-let checked_repo_root () =
-  let repo_root = OpamFilename.cwd () in
-  if not (OpamFilename.exists_dir (OpamRepositoryPath.packages_dir repo_root))
+let repo_version_lt repo_root v =
+  let v' =
+    let open OpamStd.Option.Op in
+    (OpamFile.Repo.read_opt
+       (OpamRepositoryRoot.Dir.Path.repo repo_root)
+     >>= OpamFile.Repo.opam_version)
+    +! OpamAdminRepoUpgrade.upgradefrom_version
+  in
+  if OpamVersion.compare v v' > 0 then Some v' else None
+
+let checked_repo_root ?(check=true) () =
+  let repo_root = OpamRepositoryRoot.Dir.cwd () in
+  if not (OpamFilename.exists_dir
+            (OpamRepositoryRoot.Dir.Path.packages_dir repo_root))
   then
     OpamConsole.error_and_exit `Bad_arguments
       "No repository found in current directory.\n\
        Please make sure there is a \"packages%s\" directory" OpamArg.dir_sep;
+  (if check then
+     match repo_version_lt repo_root
+             OpamAdminRepoUpgrade.upgradeto_version with
+     | Some v ->
+       OpamConsole.warning
+         "The repository is at version %s, \
+          please consider upgrading to %s with 'opam admin upgrade'"
+         (OpamVersion.to_string v)
+         (OpamVersion.to_string OpamAdminRepoUpgrade.upgradeto_version)
+     | None -> ());
   repo_root
 
 let global_options cli =
@@ -76,8 +97,9 @@ let index_command cli =
   in
   let cmd global_options urls_txt () =
     OpamArg.apply_global_options cli global_options;
-    let repo_root = checked_repo_root ()  in
-    let repo_file = OpamRepositoryPath.repo repo_root in
+    let repo_root = checked_repo_root () in
+    let repo_root_dir = OpamRepositoryRoot.Dir.to_dir repo_root in
+    let repo_file = OpamRepositoryRoot.Dir.Path.repo repo_root in
     let repo_def =
       match OpamFile.Repo.read_opt repo_file with
       | None ->
@@ -92,28 +114,31 @@ let index_command cli =
           (t.Unix.tm_year + 1900) (t.Unix.tm_mon +1) t.Unix.tm_mday
           t.Unix.tm_hour t.Unix.tm_min
       in
-      match OpamUrl.guess_version_control (OpamFilename.Dir.to_string repo_root)
+      match
+        OpamUrl.guess_version_control
+          (OpamRepositoryRoot.Dir.to_string repo_root)
       with
       | None -> date ()
       | Some vcs ->
         let module VCS = (val OpamRepository.find_backend_by_kind vcs) in
-        match OpamProcess.Job.run (VCS.revision repo_root) with
+        match OpamProcess.Job.run (VCS.revision repo_root_dir) with
         | None -> date ()
-        | Some hash -> OpamPackage.Version.to_string hash
+        | Some hash -> hash
     in
     let repo_def = OpamFile.Repo.with_stamp repo_stamp repo_def in
     OpamFile.Repo.write repo_file repo_def;
     if urls_txt <> `no_urls_txt then
       (OpamConsole.msg "Generating urls.txt...\n";
-       OpamFilename.of_string "repo" ::
+       OpamFilename.of_string OpamRepositoryPathName.repo_f ::
        (if urls_txt = `full_urls_txt then
-          OpamFilename.rec_files OpamFilename.Op.(repo_root / "compilers") @
-          OpamFilename.rec_files (OpamRepositoryPath.packages_dir repo_root)
+          OpamFilename.rec_files OpamFilename.Op.(repo_root_dir / "compilers") @
+          OpamFilename.rec_files
+            (OpamRepositoryRoot.Dir.Path.packages_dir repo_root)
         else []) |>
        List.fold_left (fun set f ->
            if not (OpamFilename.exists f) then set else
-           let attr = OpamFilename.to_attribute repo_root f in
-           OpamFilename.Attribute.Set.add attr set
+             let attr = OpamFilename.to_attribute repo_root_dir f in
+             OpamFilename.Attribute.Set.add attr set
          ) OpamFilename.Attribute.Set.empty |>
        OpamFile.File_attributes.write
          (OpamFile.make (OpamFilename.of_string "urls.txt")));
@@ -126,25 +151,28 @@ let index_command cli =
 
 let cache_urls repo_root repo_def =
   let global_dl_cache =
-    OpamStd.Option.Op.(OpamStateConfig.(load !r.root_dir) +!
+    OpamStd.Option.Op.(OpamStateConfig.(load ~lock_kind:`Lock_read !r.root_dir) +!
                        OpamFile.Config.empty)
     |> OpamFile.Config.dl_cache
   in
   let repo_dl_cache =
-    OpamStd.List.filter_map (fun rel ->
+    List.filter_map (fun rel ->
         if OpamStd.String.contains ~sub:"://" rel
         then OpamUrl.parse_opt ~handle_suffix:false rel
-        else Some OpamUrl.Op.(OpamUrl.of_string
-                                (OpamFilename.Dir.to_string repo_root) / rel))
+        else
+          Some
+            OpamUrl.Op.(OpamUrl.of_string
+                          (OpamRepositoryRoot.Dir.to_string repo_root) / rel))
       (OpamFile.Repo.dl_cache repo_def)
   in
   repo_dl_cache @ global_dl_cache
 
 (* Downloads all urls of the given package to the given cache_dir *)
-let package_files_to_cache repo_root cache_dir cache_urls ?link (nv, prefix) =
+let package_files_to_cache repo_root cache_dir cache_urls
+    ~recheck ?link (nv, prefix) =
   match
     OpamFileTools.read_opam
-      (OpamRepositoryPath.packages repo_root prefix nv)
+      (OpamRepositoryRoot.Dir.Path.packages repo_root prefix nv)
   with
   | None -> Done (OpamPackage.Map.empty)
   | Some opam ->
@@ -153,24 +181,35 @@ let package_files_to_cache repo_root cache_dir cache_urls ?link (nv, prefix) =
         OpamPackage.to_string nv ^
         OpamStd.Option.to_string ((^) "/") name
       in
-      match OpamFile.URL.checksum urlf with
+      let checksums =
+        OpamHash.sort (OpamFile.URL.checksum urlf)
+      in
+      match checksums with
       | [] ->
         OpamConsole.warning "[%s] no checksum, not caching"
           (OpamConsole.colorise `green label);
         Done errors
-      | (first_checksum :: _) as checksums ->
-        OpamRepository.pull_file_to_cache label
-          ~cache_urls ~cache_dir
-          checksums
-          (OpamFile.URL.url urlf :: OpamFile.URL.mirrors urlf)
-        @@| fun r -> match OpamRepository.report_fetch_result nv r with
-        | Not_available (_,m) ->
-          OpamPackage.Map.update nv (fun l -> m::l) [] errors
-        | Up_to_date () | Result () ->
-          OpamStd.Option.iter (fun link_dir ->
-              let target =
-                OpamRepository.cache_file cache_dir first_checksum
-              in
+      | _::_ ->
+        let cache_files =
+          List.map (OpamRepository.cache_file cache_dir) checksums
+        in
+        let error_opt =
+          if not recheck && List.for_all OpamFilename.exists cache_files then
+            Done None
+          else
+            OpamRepository.pull_file_to_cache label
+              ~cache_urls ~cache_dir
+              checksums
+              (OpamFile.URL.url urlf :: OpamFile.URL.mirrors urlf)
+            @@| fun r -> match OpamRepository.report_fetch_result nv r with
+            | Not_available (_,m) -> Some m
+            | Up_to_date () | Result () -> None
+        in
+        error_opt @@| function
+        | Some m ->
+          OpamPackage.Map.add_to_list nv m errors
+        | None ->
+          Stdlib.Option.iter (fun link_dir ->
               let name =
                 OpamStd.Option.default
                   (OpamUrl.basename (OpamFile.URL.url urlf))
@@ -179,7 +218,7 @@ let package_files_to_cache repo_root cache_dir cache_urls ?link (nv, prefix) =
               let link =
                 OpamFilename.Op.(link_dir / OpamPackage.to_string nv // name)
               in
-              OpamFilename.link ~relative:true ~target ~link)
+              OpamFilename.link ~relative:true ~target:(List.hd cache_files) ~link)
             link;
           errors
     in
@@ -226,10 +265,17 @@ let cache_command cli =
       "JOBS" "Number of parallel downloads"
       OpamArg.positive_integer 8
   in
-  let cmd global_options cache_dir no_repo_update link jobs () =
+  let recheck_arg =
+    OpamArg.mk_flag ~cli OpamArg.(cli_from cli2_2) ["check-all"; "c"]
+      "Run a full integrity check on the existing cache. If this is not set, \
+       only missing cache files are handled."
+  in
+  let cmd global_options cache_dir no_repo_update link jobs recheck () =
     OpamArg.apply_global_options cli global_options;
+    (* this option was the default until 2.1 *)
+    let recheck = recheck || OpamCLIVersion.Op.(cli @< OpamArg.cli2_2) in
     let repo_root = checked_repo_root () in
-    let repo_file = OpamRepositoryPath.repo repo_root in
+    let repo_file = OpamRepositoryRoot.Dir.Path.repo repo_root in
     let repo_def = OpamFile.Repo.safe_read repo_file in
 
     let pkg_prefixes = OpamRepository.packages_with_prefixes repo_root in
@@ -238,8 +284,9 @@ let cache_command cli =
     let errors =
       OpamParallel.reduce ~jobs
         ~nil:OpamPackage.Map.empty
-        ~merge:(OpamPackage.Map.union (fun a _ -> a))
-        ~command:(package_files_to_cache repo_root cache_dir cache_urls ?link)
+        ~merge:(OpamPackage.Map.strict_union (fun a _ -> a))
+        ~command:(package_files_to_cache repo_root cache_dir cache_urls
+                    ~recheck ?link)
         (List.sort (fun (nv1,_) (nv2,_) ->
              (* Some pseudo-randomisation to avoid downloading all files from
                 the same host simultaneously *)
@@ -249,9 +296,13 @@ let cache_command cli =
             (OpamPackage.Map.bindings pkg_prefixes))
     in
 
-    let cache_dir_url = OpamFilename.remove_prefix_dir repo_root cache_dir in
+    let cache_dir_url =
+      OpamFilename.remove_prefix_dir
+        (OpamRepositoryRoot.Dir.to_dir repo_root) cache_dir
+    in
     if not no_repo_update then
-      if not (List.mem cache_dir_url (OpamFile.Repo.dl_cache repo_def)) then
+      if not (OpamStd.List.mem String.equal
+                cache_dir_url (OpamFile.Repo.dl_cache repo_def)) then
         (OpamConsole.msg "Adding %s to %s...\n"
            cache_dir_url (OpamFile.to_string repo_file);
          OpamFile.Repo.write repo_file
@@ -274,29 +325,271 @@ let cache_command cli =
   in
   OpamArg.mk_command  ~cli OpamArg.cli_original command ~doc ~man
     Term.(const cmd $ global_options cli $
-          cache_dir_arg $ no_repo_update_arg $ link_arg $ jobs_arg)
+          cache_dir_arg $ no_repo_update_arg $ link_arg $ jobs_arg $
+          recheck_arg)
+
+let packages_with_prefixes repo_root packages =
+  let pkgs_map = OpamRepository.packages_with_prefixes repo_root in
+  if packages = [] then pkgs_map else
+  let pkgs_map, missing_pkgs =
+    List.fold_left (fun (map, missing) (n,vo)->
+        match vo with
+        | Some v ->
+          let nv = OpamPackage.create n v in
+          (match OpamPackage.Map.find_opt nv pkgs_map with
+           | Some pre ->( OpamPackage.Map.add nv pre map), missing
+           | None -> map, (n,vo)::missing)
+        | None ->
+          let n_map = OpamPackage.packages_of_name_map pkgs_map n in
+          if OpamPackage.Map.is_empty n_map then
+            map, (n,vo)::missing
+          else
+            (OpamPackage.Map.union (fun _nv _nv' ->
+                 OpamStd.Sys.exit_because `Internal_error)
+                n_map map),
+            missing
+      ) (OpamPackage.Map.empty, []) packages
+  in
+  if missing_pkgs <> [] then
+    OpamConsole.warning "Not found package%s %s. Ignoring them."
+      (match missing_pkgs with | [_] -> "" | _ -> "s")
+      (OpamStd.Format.pretty_list
+         (List.map
+            (fun (n,vo) ->
+               OpamConsole.colorise `underline
+                 (match vo with
+                  | Some v -> OpamPackage.to_string (OpamPackage.create n v)
+                  | None -> OpamPackage.Name.to_string n))
+            (List.rev missing_pkgs)));
+  pkgs_map
+
+let update_extrafiles_command_doc =
+  "Add extra-files to an opam repository."
+let update_extrafiles_command cli =
+  let command = "update-extrafiles" in
+  let doc = update_extrafiles_command_doc in
+  let man = [
+    `S Manpage.s_description;
+    `P "This command scans through package definitions, and add extrafiles \
+        field as requested."
+  ]
+  in
+  let hash_type_arg =
+    OpamArg.mk_opt ~cli OpamArg.(cli_from cli2_2) ["hash"]
+      "HASH_ALGO" "The hash, or hashes to be added"
+      (Arg.some OpamArg.hash_kinds) None
+  in
+  let packages =
+    OpamArg.mk_opt ~cli OpamArg.(cli_from cli2_2) ["p";"packages"]
+      "PACKAGES" "Only add extra files for the given packages"
+      Arg.(list OpamArg.package) []
+  in
+  let cmd global_options hash_type packages () =
+    OpamArg.apply_global_options cli global_options;
+    let repo_root = checked_repo_root () in
+    let pkg_prefixes = packages_with_prefixes repo_root packages in
+    let compute ?kind file =
+      OpamHash.compute ?kind (OpamFilename.to_string file)
+    in
+    let has_error =
+      OpamPackage.Map.fold (fun nv prefix has_error ->
+          let opam_file = OpamRepositoryRoot.Dir.Path.opam repo_root prefix nv in
+          let opam = OpamFile.OPAM.read opam_file in
+          let has_error =
+            if OpamFile.exists
+                (OpamRepositoryRoot.Dir.Path.url repo_root prefix nv)
+            then
+              (OpamConsole.warning "Not updating external URL file at %s"
+                 (OpamFile.to_string
+                    (OpamRepositoryRoot.Dir.Path.url repo_root prefix nv));
+               true)
+            else has_error
+          in
+          let files_dir =
+            OpamRepositoryRoot.Dir.Path.files repo_root prefix nv
+          in
+          if OpamFilename.exists_dir files_dir then
+            (let files =
+               OpamFilename.rec_files files_dir
+               |> List.map (fun file ->
+                   file,
+                   OpamFilename.Base.of_string
+                     (OpamFilename.remove_prefix files_dir file))
+             in
+             let extra_files =
+               OpamStd.Option.default [] (OpamFile.OPAM.extra_files opam)
+             in
+             let extra_files = OpamFilename.Base.Map.of_list extra_files in
+             let xfiles =
+               List.fold_left (fun extra (file, base) ->
+                   match OpamFilename.Base.Map.find_opt base extra_files with
+                   | Some hash ->
+                     let kind = OpamHash.kind hash in
+                     let xhash = compute ~kind file in
+                     if OpamHash.compare hash xhash <> 0 then
+                       OpamFilename.Base.Map.add base
+                         (OpamStd.Option.map_default (fun kind ->
+                              compute ~kind file) xhash hash_type)
+                         extra
+                     else
+                       (match hash_type with
+                        | Some kind ->
+                          OpamFilename.Base.Map.add base (compute ~kind file)
+                            extra
+                        | None -> extra)
+                   | None ->
+                     OpamFilename.Base.Map.add base
+                       (compute ?kind:hash_type file) extra)
+                 extra_files files
+             in
+             if not (OpamFilename.Base.Map.equal
+                       OpamHash.equal extra_files xfiles) then
+               let xfiles = OpamFilename.Base.Map.bindings xfiles in
+               let opam1 = OpamFile.OPAM.with_extra_files xfiles opam in
+               OpamFile.OPAM.write_with_preserved_format opam_file opam1);
+          has_error)
+        pkg_prefixes false
+    in
+    if has_error then OpamStd.Sys.exit_because `Sync_error
+    else OpamStd.Sys.exit_because `Success
+  in
+  OpamArg.mk_command  ~cli OpamArg.(cli_from cli2_2) command ~doc ~man
+    Term.(const cmd $ global_options cli
+          $ hash_type_arg $ packages)
+
+let migrate_extrafiles_command_doc =
+  "Move extra-files to extra-source."
+let migrate_extrafiles_command cli =
+  let command = "migrate-extrafiles" in
+  let doc = migrate_extrafiles_command_doc in
+  let man = [
+    `S Manpage.s_description;
+    `P "This command scans through package definitions, and migrates all \
+        $(i,extra-files) fields to $(i,extra-source) as requested."
+  ] in
+  let hash_type_arg =
+    OpamArg.mk_opt ~cli OpamArg.(cli_from cli2_4) ["hash"]
+      "HASH_ALGO" "The hash, or hashes to be added"
+      OpamArg.hash_kinds `SHA256
+  in
+  let packages =
+    OpamArg.mk_opt ~cli OpamArg.(cli_from cli2_4) ["p";"packages"]
+      "PACKAGES" "Only add extra files for the given packages"
+      Arg.(list OpamArg.package) []
+  in
+  let local_dir_arg =
+    let doc =
+      Arg.info ~docv:"DIR"
+        ~doc:"Name of the local directory where to put the extra-files. \
+              They will be put into \
+              DIR/patches/<pkgname>/<pkgname.version>/filenameYY" []
+    in
+    Arg.(required & pos 0 (some OpamArg.dirname) None & doc)
+  and url_prefix_arg =
+    let doc =
+      Arg.info ~docv:"URL"
+        ~doc:"Prefix of the URL to emit into extra-sources." []
+    in
+    Arg.(required & pos 1 (some OpamArg.url) None & doc)
+  in
+  let cmd global_options kind packages local_dir url_prefix () =
+    OpamArg.apply_global_options cli global_options;
+    let repo_root = checked_repo_root () in
+    let pkg_prefixes = packages_with_prefixes repo_root packages in
+    let compute ?kind file =
+      OpamHash.compute ?kind (OpamFilename.to_string file)
+    in
+    let has_error =
+      OpamPackage.Map.fold (fun nv prefix has_error ->
+          let opam_file = OpamRepositoryRoot.Dir.Path.opam repo_root prefix nv in
+          let opam = OpamFile.OPAM.read opam_file in
+          let has_error =
+            let urlfile = OpamRepositoryRoot.Dir.Path.url repo_root prefix nv in
+            if OpamFile.exists urlfile then
+              (OpamConsole.warning
+                 "Not updating external URL file at %s, \
+                  consider upgrading your repository with 'opam admin upgrade'"
+                 (OpamFile.to_string urlfile);
+               true)
+            else has_error
+          in
+          let files_dir =
+            OpamRepositoryRoot.Dir.Path.files repo_root prefix nv
+          in
+          if OpamFilename.exists_dir files_dir then
+            (let files =
+               OpamFilename.rec_files files_dir
+               |> List.map (fun file ->
+                   file,
+                   OpamFilename.Base.of_string
+                     (OpamFilename.remove_prefix files_dir file))
+             in
+             match files with
+             | [] -> has_error
+             | _ ->
+               let hashes =
+                 List.map (fun (file, base) ->
+                     let xhash = compute ~kind file in
+                     file, base, xhash)
+                   files
+               in
+               let patch_prefix = "patches" in
+               let extra_sources =
+                 List.map (fun (src, base, hash) ->
+                     let name = OpamPackage.name_to_string nv in
+                     let name_version = OpamPackage.to_string nv in
+                     let dst_dir = OpamFilename.Op.(
+                         local_dir / patch_prefix / name / name_version
+                       ) in
+                     let dst = OpamFilename.create dst_dir base in
+                     (* copy file to dst, remove from files *)
+                     OpamFilename.mkdir dst_dir;
+                     OpamFilename.copy ~src ~dst;
+                     let url =
+                       let file = OpamFilename.Base.to_string base in
+                       OpamFile.URL.create ~checksum:[hash]
+                         OpamUrl.Op.(url_prefix / patch_prefix
+                                     / name / name_version/ file)
+                     in
+                     base, url)
+                   hashes
+               in
+               OpamFilename.cleandir files_dir;
+               OpamFilename.rmdir_cleanup files_dir;
+               let my_extra_sources = OpamFile.OPAM.extra_sources opam in
+               let opam1 =
+                 OpamFile.OPAM.with_extra_sources
+                   (my_extra_sources @ extra_sources) opam
+               in
+               let opam1 = OpamFile.OPAM.with_extra_files_opt None opam1 in
+               OpamFile.OPAM.write_with_preserved_format opam_file opam1;
+               has_error)
+          else
+            has_error)
+        pkg_prefixes false
+    in
+    if has_error then OpamStd.Sys.exit_because `Sync_error
+    else OpamStd.Sys.exit_because `Success
+  in
+  OpamArg.mk_command ~cli OpamArg.(cli_from cli2_4) command ~doc ~man
+    Term.(const cmd $ global_options cli $ hash_type_arg $ packages
+          $ local_dir_arg $ url_prefix_arg)
 
 let add_hashes_command_doc =
   "Add archive hashes to an opam repository."
 let add_hashes_command cli =
   let command = "add-hashes" in
   let doc = add_hashes_command_doc in
-  let cache_dir = OpamFilename.Dir.of_string "~/.cache/opam-hash-cache" in
   let man = [
     `S Manpage.s_description;
-    `P (Printf.sprintf
-          "This command scans through package definitions, and add hashes as \
-           requested (fetching the archives if required). A cache is generated \
-           in %s for subsequent runs."
-          (OpamArg.escape_path (OpamFilename.Dir.to_string cache_dir)));
+    `P "This command scans through package definitions, and add hashes as \
+        requested (fetching the archives if required). A cache is generated \
+        in <opamroot>/download-cache/hash-cache for subsequent runs.";
   ]
   in
-  let hash_kinds = [`MD5; `SHA256; `SHA512] in
   let hash_types_arg =
     OpamArg.nonempty_arg_list "HASH_ALGO" "The hash, or hashes to be added"
-      (Arg.enum
-         (List.map (fun k -> OpamHash.string_of_kind k, k)
-            hash_kinds))
+      OpamArg.hash_kinds
   in
   let packages =
     OpamArg.mk_opt ~cli OpamArg.(cli_from cli2_1) ["p";"packages"]
@@ -307,32 +600,32 @@ let add_hashes_command cli =
     OpamArg.mk_flag ~cli OpamArg.cli_original ["replace"]
       "Replace the existing hashes rather than adding to them"
   in
-  let hash_tables =
-    let t = Hashtbl.create (List.length hash_kinds) in
+  let create_hash_tables hash_cache_dir =
+    let t = Hashtbl.create (List.length OpamHash.all_kinds) in
     List.iter (fun k1 ->
         List.iter (fun k2 ->
             if k1 <> k2 then (
               let cache_file : string list list OpamFile.t =
                 OpamFile.make @@ OpamFilename.Op.(
-                    cache_dir //
+                    hash_cache_dir //
                     (OpamHash.string_of_kind k1 ^ "_to_" ^
                      OpamHash.string_of_kind k2))
               in
               let t_mapping = Hashtbl.create 187 in
               (OpamStd.Option.default [] (OpamFile.Lines.read_opt cache_file)
                |> List.iter @@ function
-                | [src; dst] ->
-                  Hashtbl.add t_mapping
-                    (OpamHash.of_string src) (OpamHash.of_string dst)
-                | _ -> failwith ("Bad cache at "^OpamFile.to_string cache_file));
+               | [src; dst] ->
+                 Hashtbl.add t_mapping
+                   (OpamHash.of_string src) (OpamHash.of_string dst)
+               | _ -> failwith ("Bad cache at "^OpamFile.to_string cache_file));
               Hashtbl.add t (k1,k2) (cache_file, t_mapping);
             ))
-          hash_kinds
+          OpamHash.all_kinds
       )
-      hash_kinds;
+      OpamHash.all_kinds;
     t
   in
-  let save_hashes () =
+  let save_hashes hash_tables =
     Hashtbl.iter (fun _ (file, tbl) ->
         Hashtbl.fold
           (fun src dst l -> [OpamHash.to_string src; OpamHash.to_string dst]::l)
@@ -346,7 +639,7 @@ let add_hashes_command cli =
       hash_tables
   in
   let additions_count = ref 0 in
-  let get_hash cache_urls kind known_hashes url =
+  let get_hash hash_tables ~cache_urls ~cache_dir kind known_hashes url =
     let found =
       List.fold_left (fun result hash ->
           match result with
@@ -367,14 +660,12 @@ let add_hashes_command cli =
         OpamProcess.Job.ignore_errors ~default:None
           (fun () ->
              OpamRepository.pull_file (OpamUrl.to_string url)
-               ~cache_dir:(OpamRepositoryPath.download_cache
-                             OpamStateConfig.(!r.root_dir))
-               ~cache_urls
+               ~cache_dir ~cache_urls
                f known_hashes [url]
              @@| function
              | Result () | Up_to_date () ->
                OpamHash.compute ~kind (OpamFilename.to_string f)
-               |> OpamStd.Option.some
+               |> Stdlib.Option.some
              | Not_available _ -> None)
       in
       (match h with
@@ -385,85 +676,63 @@ let add_hashes_command cli =
                h0 h
            ) known_hashes;
          incr additions_count;
-         if !additions_count mod 20 = 0 then save_hashes ()
+         if !additions_count mod 20 = 0 then save_hashes hash_tables
        | None -> ());
       h
   in
   let cmd global_options hash_types replace packages () =
     OpamArg.apply_global_options cli global_options;
+    let cache_dir =
+      OpamRepositoryPath.download_cache OpamStateConfig.(!r.root_dir)
+    in
+    let hash_cache_dir = OpamFilename.Op.(cache_dir / "hash-cache") in
+    let hash_tables = create_hash_tables hash_cache_dir in
     let repo_root = checked_repo_root () in
     let cache_urls =
       cache_urls repo_root
-        (OpamFile.Repo.safe_read (OpamRepositoryPath.repo repo_root))
+        (OpamFile.Repo.safe_read (OpamRepositoryRoot.Dir.Path.repo repo_root))
     in
-    let pkg_prefixes =
-      let pkgs_map = OpamRepository.packages_with_prefixes repo_root in
-      if packages = [] then pkgs_map
-      else
-        (let pkgs_map, missing_pkgs =
-           List.fold_left (fun ((map: string option OpamPackage.Map.t),error)  (n,vo)->
-               match vo with
-               | Some v ->
-                 let nv = OpamPackage.create n v in
-                 (match OpamPackage.Map.find_opt nv pkgs_map with
-                  | Some pre ->( OpamPackage.Map.add nv pre map), error
-                  | None -> map, (n,vo)::error)
-               | None ->
-                 let n_map = OpamPackage.packages_of_name_map pkgs_map n in
-                 if OpamPackage.Map.is_empty n_map then
-                   map, (n,vo)::error
-                 else
-                   (OpamPackage.Map.union (fun _nv _nv' -> assert false) n_map map),
-                   error
-             ) (OpamPackage.Map.empty, []) packages
-         in
-         if missing_pkgs <> [] then
-           OpamConsole.warning "Not found package%s %s. Ignoring them."
-             (if List.length missing_pkgs = 1 then "" else "s")
-             (OpamStd.List.concat_map ~left:"" ~right:"" ~last_sep:" and " ", "
-                (fun (n,vo) ->
-                   OpamConsole.colorise `underline
-                     (match vo with
-                      | Some v -> OpamPackage.to_string (OpamPackage.create n v)
-                      | None -> OpamPackage.Name.to_string n)) missing_pkgs);
-         pkgs_map)
-    in
+    let pkg_prefixes = packages_with_prefixes repo_root packages in
     let has_error =
       OpamPackage.Map.fold (fun nv prefix has_error ->
-          let opam_file = OpamRepositoryPath.opam repo_root prefix nv in
+          let opam_file = OpamRepositoryRoot.Dir.Path.opam repo_root prefix nv in
           let opam = OpamFile.OPAM.read opam_file in
           let has_error =
-            if OpamFile.exists (OpamRepositoryPath.url repo_root prefix nv) then
+            if OpamFile.exists
+                (OpamRepositoryRoot.Dir.Path.url repo_root prefix nv)
+            then
               (OpamConsole.warning "Not updating external URL file at %s"
-                 (OpamFile.to_string (OpamRepositoryPath.url repo_root prefix nv));
+                 (OpamFile.to_string
+                    (OpamRepositoryRoot.Dir.Path.url repo_root prefix nv));
                true)
             else has_error
           in
           let process_url has_error urlf =
-              let hashes = OpamFile.URL.checksum urlf in
-              let hashes =
-                if replace then
-                  List.filter (fun h -> List.mem (OpamHash.kind h) hash_types)
-                    hashes
-                else hashes
-              in
-              let has_error, hashes =
-                List.fold_left (fun (has_error, hashes) kind ->
-                    if List.exists (fun h -> OpamHash.kind h = kind) hashes
-                    then has_error, hashes else
-                    match get_hash cache_urls kind hashes
-                            (OpamFile.URL.url urlf)
-                    with
+            let hashes = OpamFile.URL.checksum urlf in
+            let hashes =
+              if replace then
+                List.filter (fun h ->
+                    OpamStd.List.mem OpamHash.equal_kind
+                      (OpamHash.kind h) hash_types)
+                  hashes
+              else hashes
+            in
+            let has_error, hashes =
+              List.fold_left (fun (has_error, hashes) kind ->
+                  if List.exists (fun h -> OpamHash.kind h = kind) hashes
+                  then has_error, hashes else
+                    match get_hash hash_tables ~cache_urls ~cache_dir kind
+                            hashes (OpamFile.URL.url urlf) with
                     | Some h -> has_error, hashes @ [h]
                     | None ->
                       OpamConsole.error "Could not get hash for %s: %s"
                         (OpamPackage.to_string nv)
                         (OpamUrl.to_string (OpamFile.URL.url urlf));
                       true, hashes)
-                  (has_error, hashes)
-                  hash_types
-              in
-              has_error, OpamFile.URL.with_checksum hashes urlf
+                (has_error, hashes)
+                hash_types
+            in
+            has_error, OpamFile.URL.with_checksum hashes urlf
           in
           let has_error, url_opt =
             match OpamFile.OPAM.url opam with
@@ -487,7 +756,7 @@ let add_hashes_command cli =
         )
         pkg_prefixes false
     in
-    save_hashes ();
+    save_hashes hash_tables;
     if has_error then OpamStd.Sys.exit_because `Sync_error
     else OpamStd.Sys.exit_because `Success
   in
@@ -512,11 +781,8 @@ let upgrade_command cli =
   ]
   in
   let clear_cache_arg =
-    OpamArg.mk_flag ~cli OpamArg.cli_original ["clear-cache"]
-      (Printf.sprintf
-         "Instead of running the upgrade, clear the cache of archive hashes (held \
-          in ~%s.cache), that is used to avoid re-downloading files to obtain \
-          their hashes at every run." OpamArg.dir_sep)
+    OpamArg.mk_flag ~cli OpamArg.(cli_between cli2_0 cli2_6) ["clear-cache"]
+      "Deprecated"
   in
   let create_mirror_arg =
     OpamArg.mk_opt ~cli OpamArg.cli_original ["m"; "mirror"] "URL"
@@ -526,20 +792,20 @@ let upgrade_command cli =
        of opam don't understand relative redirects)."
       Arg.(some OpamArg.url) None
   in
-  let cmd global_options clear_cache create_mirror () =
+  let cmd global_options _clear_cache create_mirror () =
     OpamArg.apply_global_options cli global_options;
-    if clear_cache then OpamAdminRepoUpgrade.clear_cache ()
-    else match create_mirror with
-      | None ->
-        OpamAdminRepoUpgrade.do_upgrade (OpamFilename.cwd ());
-        if OpamFilename.exists (OpamFilename.of_string "index.tar.gz") ||
-           OpamFilename.exists (OpamFilename.of_string "urls.txt")
-        then
-          OpamConsole.note
-            "Indexes need updating: you should now run:\n\
-             \n\
-            \  opam admin index"
-      | Some m -> OpamAdminRepoUpgrade.do_upgrade_mirror (OpamFilename.cwd ()) m
+    let repo_root = checked_repo_root ~check:false () in
+    match create_mirror with
+    | None ->
+      OpamAdminRepoUpgrade.do_upgrade repo_root;
+      if OpamFilename.exists (OpamFilename.of_string "index.tar.gz") ||
+         OpamFilename.exists (OpamFilename.of_string "urls.txt")
+      then
+        OpamConsole.note
+          "Indexes need updating: you should now run:\n\
+           \n\
+          \  opam admin index"
+    | Some m -> OpamAdminRepoUpgrade.do_upgrade_mirror repo_root m
   in
   OpamArg.mk_command  ~cli OpamArg.cli_original command ~doc ~man
     Term.(const cmd $ global_options cli $
@@ -584,8 +850,10 @@ let lint_command cli =
   in
   let cmd global_options short list incl excl ign warn_error () =
     OpamArg.apply_global_options cli global_options;
-    let repo_root = OpamFilename.cwd () in
-    if not (OpamFilename.exists_dir OpamFilename.Op.(repo_root / "packages"))
+    let repo_root = checked_repo_root () in
+    if not (OpamFilename.exists_dir
+              OpamFilename.Op.(OpamRepositoryRoot.Dir.to_dir repo_root
+                               / OpamRepositoryPathName.packages_d))
     then
         OpamConsole.error_and_exit `Bad_arguments
           "No repository found in current directory.\n\
@@ -593,12 +861,15 @@ let lint_command cli =
     let pkg_prefixes = OpamRepository.packages_with_prefixes repo_root in
     let ret =
       OpamPackage.Map.fold (fun nv prefix ret ->
-          let opam_file = OpamRepositoryPath.opam repo_root prefix nv in
+          let opam_file = OpamRepositoryRoot.Dir.Path.opam repo_root prefix nv in
           let w, _ = OpamFileTools.lint_file ~handle_dirname:true opam_file in
-          if List.exists (fun (n,_,_) -> List.mem n ign) w then ret else
+          if List.exists (fun (n,_,_) -> OpamStd.List.mem Int.equal n ign) w then
+            ret
+          else
           let w =
             List.filter (fun (n,_,_) ->
-                (incl = [] || List.mem n incl) && not (List.mem n excl))
+                (incl = [] || OpamStd.List.mem Int.equal n incl) &&
+                not (OpamStd.List.mem Int.equal n excl))
               w
           in
           if w <> [] then
@@ -643,11 +914,6 @@ let check_command cli =
         are supposed to be available. By default, all checks are run."
   ]
   in
-  let ignore_test_arg =
-    OpamArg.mk_flag ~cli OpamArg.cli_original ["ignore-test-doc";"i"]
-      "By default, $(b,{with-test}) and $(b,{with-doc}) dependencies are \
-       included. This ignores them, and makes the test more tolerant."
-  in
   let print_short_arg =
     OpamArg.mk_flag ~cli OpamArg.cli_original ["s";"short"]
       "Only output a list of uninstallable packages"
@@ -664,7 +930,7 @@ let check_command cli =
     OpamArg.mk_flag ~cli OpamArg.cli_original ["obsolete"]
       "Analyse for obsolete packages"
   in
-  let cmd global_options ignore_test print_short
+  let cmd global_options print_short
       installability cycles obsolete () =
     OpamArg.apply_global_options cli global_options;
     let repo_root = checked_repo_root () in
@@ -675,7 +941,7 @@ let check_command cli =
     in
     let pkgs, unav_roots, uninstallable, cycle_packages, obsolete =
       OpamAdminCheck.check
-        ~quiet:print_short ~installability ~cycles ~obsolete ~ignore_test
+        ~quiet:print_short ~installability ~cycles ~obsolete
         repo_root
     in
     let all_ok =
@@ -709,8 +975,73 @@ let check_command cli =
     OpamStd.Sys.exit_because (if all_ok then `Success else `False)
   in
   OpamArg.mk_command  ~cli OpamArg.cli_original command ~doc ~man
-  Term.(const cmd $ global_options cli $ ignore_test_arg $ print_short_arg
+  Term.(const cmd $ global_options cli $ print_short_arg
         $ installability_arg $ cycles_arg $ obsolete_arg)
+
+let compare_versions_command_doc = "Compare two package versions"
+let compare_versions_command cli =
+  let operator : OpamFormula.relop option Term.t =
+     let make_flag (relop : OpamFormula.relop) =
+       let flag_name =
+         match relop with
+         | `Eq -> "eq"
+         | `Neq -> "neq"
+         | `Geq -> "geq"
+         | `Gt -> "gt"
+         | `Leq -> "leq"
+         | `Lt -> "lt"
+       in
+       let doc = Printf.sprintf "assert V0 %s V1" (OpamFormula.string_of_relop relop) in
+       OpamArg.(cli_from cli2_4), Some relop, [ flag_name ], doc
+     in
+     OpamArg.mk_vflag ~cli None (List.map make_flag OpamFormula.all_relop)
+  in
+  let version_arg n =
+    let doc =
+      Arg.info
+        ~docv:(Printf.sprintf "V%d" n)
+        ~doc:"Package version to compare" []
+    in
+    Arg.(required & pos n (some OpamArg.package_version) None & doc)
+  in
+  let command = "compare-versions" in
+  let doc = compare_versions_command_doc in
+  let man = [
+    `S Manpage.s_description;
+    `P "This command compares 2 package versions. By default it outputs 'V0 OP \
+        V1' to the console with OP in {<,>,=} such that the equation holds. \
+        When an operator is supplied, the output is suppressed and the result \
+        of the comparison is checked against the provided operator: the command \
+        exits 0 if the comparison holds, and 1 otherwise. For example:";
+    `Pre "\n\
+          \\$ opam admin compare-versions 0.0.9 0.0.10\n\
+          0.0.9 < 0.0.10\n\
+          \n\
+          \\$ opam admin compare-versions 0.0.9 --lt 0.0.10\n\
+          [0]\n\
+          \n\
+          \\$ opam admin compare-versions 0.0.9 --eq 0.0.10\n\
+          [1]";
+    `S Manpage.s_arguments;
+    `S Manpage.s_options;
+  ]
+  in
+  let cmd v0 v1 operator () =
+    match operator with
+    | None ->
+      let result = OpamPackage.Version.compare v0 v1 in
+      OpamConsole.formatted_msg "%s %s %s\n"
+        (OpamPackage.Version.to_string v0)
+        (if result < 0 then "<" else if result = 0 then "=" else ">")
+        (OpamPackage.Version.to_string v1)
+    | Some operator ->
+      OpamStd.Sys.exit_because
+        (if OpamFormula.eval_relop operator v0 v1
+         then `Success
+         else `False)
+  in
+  OpamArg.mk_command ~cli OpamArg.(cli_from cli2_4) command ~doc ~man
+    Term.(const cmd $ version_arg 0 $ version_arg 1 $ operator)
 
 let pattern_list_arg =
   OpamArg.arg_list "PATTERNS"
@@ -720,7 +1051,7 @@ let pattern_list_arg =
 
 let env_arg cli =
   OpamArg.mk_opt ~cli OpamArg.cli_original ["environment"]
-    "VAR=VALUE[;VAR=VALUE]"
+    "VAR=VALUE[,VAR=VALUE]"
     (Printf.sprintf
        "Use the given opam environment, in the form of a list of \
         comma-separated 'var=value' bindings, when resolving variables. This \
@@ -734,7 +1065,7 @@ let env_arg cli =
     Arg.(list string) []
 
 let state_selection_arg cli =
-  OpamArg.mk_vflag ~cli ~section:OpamArg.package_selection_section
+  OpamArg.mk_vflag ~cli ~section:OpamArg.order_sensible_selector_section
     OpamListCommand.Available [
     OpamArg.cli_original, OpamListCommand.Any, ["A";"all"],
     "Include all, even uninstalled or unavailable packages";
@@ -748,6 +1079,8 @@ let state_selection_arg cli =
      $(b,environment) (this calls the solver and may be more costly; \
      a package depending on an unavailable one may be available, but \
      is never installable)";
+    OpamArg.cli_from OpamArg.cli2_3, OpamListCommand.Latests_only,
+    ["latests-only"], "List only the latest version of each package.";
   ]
 
 let get_virtual_switch_state repo_root env =
@@ -763,30 +1096,29 @@ let get_virtual_switch_state repo_root env =
     repo_url = OpamUrl.empty;
     repo_trust = None;
   } in
-  let repo_file = OpamRepositoryPath.repo repo_root in
+  let repo_file = OpamRepositoryRoot.Dir.Path.repo repo_root in
   let repo_def = OpamFile.Repo.safe_read repo_file in
   let opams =
     OpamRepositoryState.load_opams_from_dir repo.repo_name repo_root
   in
   let gt = {
     global_lock = OpamSystem.lock_none;
+    lock = OpamSystem.lock_none;
     root = OpamStateConfig.(!r.root_dir);
-    config = OpamStd.Option.Op.(OpamStateConfig.(load !r.root_dir) +!
+    config = OpamStd.Option.Op.(OpamStateConfig.(
+        load ~lock_kind:`Lock_read !r.root_dir) +!
                                 OpamFile.Config.empty);
     global_variables = OpamVariable.Map.empty;
+    global_state_to_upgrade = { gtc_repo = false; gtc_switch = false; };
   } in
   let singl x = OpamRepositoryName.Map.singleton repo.repo_name x in
-  let repos_tmp =
-    let t = Hashtbl.create 1 in
-    Hashtbl.add t repo.repo_name (lazy repo_root); t
-  in
   let rt = {
     repos_global = gt;
     repos_lock = OpamSystem.lock_none;
     repositories = singl repo;
     repos_definitions = singl repo_def;
     repo_opams = singl opams;
-    repos_tmp;
+    repos_syspkgs_available = None;
   } in
   let gt =
     {gt with global_variables =
@@ -816,7 +1148,15 @@ let list_command cli =
         opam installation.";
     `S Manpage.s_arguments;
     `S Manpage.s_options;
+    `S OpamArg.order_sensible_selector_section;
+    `P "These options are sensible to the order they are given to the command. \
+        For example: $(b,--available --latests-only) will first list all the \
+        available packages, then choose only the latest packages in that set; \
+        while $(b,--latests-only --available) will first lists all the latest \
+        packages, then only show the ones that are available in that set.";
     `S OpamArg.package_selection_section;
+    `P "These options will always be given to the command in the same order, \
+        regardless of the order they have been given to the command.";
     `S OpamArg.package_listing_section;
   ]
   in
@@ -824,6 +1164,7 @@ let list_command cli =
       global_options package_selection disjunction state_selection
       package_listing env packages () =
     OpamArg.apply_global_options cli global_options;
+    let repo_root = checked_repo_root () in
     let format =
       let force_all_versions =
         match packages with
@@ -833,7 +1174,9 @@ let list_command cli =
             | None -> single
             | Some (n, _v) -> n
           in
-          (try ignore (OpamPackage.Name.of_string nameglob); true
+          (try
+             let _ : name = OpamPackage.Name.of_string nameglob in
+             true
            with Failure _ -> false)
         | _ -> false
       in
@@ -850,7 +1193,7 @@ let list_command cli =
               List.map (fun x -> Atom x) package_selection);
       ]
     in
-    let st = get_virtual_switch_state (OpamFilename.cwd ()) env in
+    let st = get_virtual_switch_state repo_root env in
     if not format.OpamListCommand.short && filter <> OpamFormula.Empty then
       OpamConsole.msg "# Packages matching: %s\n"
         (OpamListCommand.string_of_formula filter);
@@ -891,7 +1234,7 @@ let filter_command cli =
       global_options package_selection disjunction state_selection env
       remove dryrun packages () =
     OpamArg.apply_global_options cli global_options;
-    let repo_root = OpamFilename.cwd () in
+    let repo_root = checked_repo_root () in
     let pattern_selector = OpamListCommand.pattern_selector packages in
     let join =
       if disjunction then OpamFormula.ors else OpamFormula.ands
@@ -938,7 +1281,7 @@ let filter_command cli =
     let pkg_prefixes = OpamRepository.packages_with_prefixes repo_root in
     OpamPackage.Map.iter (fun nv prefix ->
         if OpamPackage.Set.mem nv packages then
-          let d = OpamRepositoryPath.packages repo_root prefix nv in
+          let d = OpamRepositoryRoot.Dir.Path.packages repo_root prefix nv in
           if dryrun then
             OpamConsole.msg "rm -rf %s\n" (OpamFilename.Dir.to_string d)
           else
@@ -984,10 +1327,15 @@ let add_constraint_command cli =
        $(b,<2)). The default in this case is to print a warning and keep \
        the existing constraint unchanged."
   in
-  let cmd global_options force atom () =
+  let packages =
+    OpamArg.mk_opt ~cli OpamArg.(cli_from cli2_2) ["p";"packages"]
+      "PACKAGES" "Only add constraints for the given packages"
+      Arg.(list OpamArg.package) []
+  in
+  let cmd global_options force atom packages () =
     OpamArg.apply_global_options cli global_options;
     let repo_root = checked_repo_root () in
-    let pkg_prefixes = OpamRepository.packages_with_prefixes repo_root in
+    let pkg_prefixes = packages_with_prefixes repo_root packages in
     let name, cstr_opt = atom in
     let cstr = match cstr_opt with
       | Some (relop, v) ->
@@ -1013,7 +1361,7 @@ let add_constraint_command cli =
            c)
     in
     OpamPackage.Map.iter (fun nv prefix ->
-        let opam_file = OpamRepositoryPath.opam repo_root prefix nv in
+        let opam_file = OpamRepositoryRoot.Dir.Path.opam repo_root prefix nv in
         let opam = OpamFile.OPAM.read opam_file in
         let deps0 = OpamFile.OPAM.depends opam in
         let deps =
@@ -1056,7 +1404,7 @@ let add_constraint_command cli =
       pkg_prefixes
   in
   OpamArg.mk_command  ~cli OpamArg.cli_original command ~doc ~man
-  Term.(pure cmd $ global_options cli $ force_arg $ atom_arg)
+  Term.(const cmd $ global_options cli $ force_arg $ atom_arg $ packages)
 
 (* HELP *)
 let help =
@@ -1074,15 +1422,18 @@ let help =
     | None       -> `Help (`Pager, None)
     | Some topic ->
       let topics = "topics" :: cmds in
-      let conv, _ = Cmdliner.Arg.enum (List.rev_map (fun s -> (s, s)) topics) in
+      let conv =
+        OpamCmdliner.Arg.conv_parser
+          (OpamCmdliner.Arg.enum (List.rev_map (fun s -> (s, s)) topics))
+      in
       match conv topic with
-      | `Error e -> `Error (false, e)
-      | `Ok t when t = "topics" ->
+      | Error (`Msg e) -> `Error (false, e)
+      | Ok t when t = "topics" ->
           List.iter (OpamConsole.msg "%s\n") cmds; `Ok ()
-      | `Ok t -> `Help (man_format, Some t) in
+      | Ok t -> `Help (man_format, Some t) in
 
-  Term.(ret (const help $Term.man_format $Term.choice_names $topic)),
-  Term.info "help" ~doc ~man
+  Term.(ret (const help $Arg.man_format $Term.choice_names $topic)),
+  Cmd.info "help" ~doc ~man
 
 let admin_subcommands cli =
   let index_command = index_command cli in
@@ -1092,10 +1443,13 @@ let admin_subcommands cli =
     upgrade_command cli;
     lint_command cli;
     check_command cli;
+    compare_versions_command cli;
     list_command cli;
     filter_command cli;
     add_constraint_command cli;
     add_hashes_command cli;
+    update_extrafiles_command cli;
+    migrate_extrafiles_command cli;
     help;
   ]
 
@@ -1125,7 +1479,7 @@ let default_subcommand cli =
       upgrade_command_doc
   in
   Term.(const usage $ global_options cli),
-  Term.info "opam admin"
+  Cmd.info "opam admin"
     ~version:(OpamVersion.to_string OpamVersion.current)
     ~sdocs:OpamArg.global_option_section
     ~doc:admin_command_doc

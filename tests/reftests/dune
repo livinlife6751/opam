@@ -6,7 +6,7 @@
 
 (executable
  (name run)
- (libraries opam-core)
+ (libraries opam-core re opam-file-format opam-state)
  (modules run))
 
 (executable
@@ -15,11 +15,12 @@
  (modules gen))
 
 (rule
+(target dune.inc.gen)
  (deps
   (glob_files *.test))
  (action
   (with-stdout-to
-   dune.inc.gen
+   %{target}
    (run ./gen.exe))))
 
 (alias
@@ -32,9 +33,22 @@
  (deps
   (alias reftest-gen)))
 
-(alias
- (name reftest-gen)
+(rule
+ (alias reftest-gen)
  (action
   (diff dune.inc dune.inc.gen)))
+
+(rule
+  (with-stdout-to opam-root-version
+    (run ./root_version.exe)))
+
+(executable
+  (name root_version)
+  (libraries opam-format)
+  (modules root_version))
+
+(rule
+  (with-stdout-to root_version.ml
+    (echo "print_endline (OpamVersion.to_string OpamFile.Config.root_version)")))
 
 (include dune.inc)

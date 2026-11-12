@@ -26,7 +26,7 @@ val disp_status_line: unit -> bool
 (** Settable attributes for ANSI terminal output. Nesting is generally not
     handled. *)
 type text_style =
-  [ `black
+  [ `gray
   | `blue
   | `bold
   | `crossed
@@ -46,30 +46,31 @@ val acolor : text_style -> unit -> string -> string
 val acolor_w : int -> text_style -> Format.formatter -> string -> unit
 
 module Symbols : sig
-  val rightwards_arrow : OpamCompat.Uchar.t
-  val box_drawings_light_down_and_right : OpamCompat.Uchar.t
-  val box_drawings_light_horizontal : OpamCompat.Uchar.t
-  val box_drawings_light_vertical : OpamCompat.Uchar.t
-  val box_drawings_light_up_and_right : OpamCompat.Uchar.t
-  val box_drawings_light_right : OpamCompat.Uchar.t
-  val circled_division_slash : OpamCompat.Uchar.t
-  val asterisk_operator : OpamCompat.Uchar.t
-  val north_east_arrow : OpamCompat.Uchar.t
-  val south_east_arrow : OpamCompat.Uchar.t
-  val clockwise_open_circle_arrow : OpamCompat.Uchar.t
-  val greek_small_letter_lambda : OpamCompat.Uchar.t
-  val latin_capital_letter_o_with_stroke : OpamCompat.Uchar.t
-  val six_pointed_black_star : OpamCompat.Uchar.t
-  val upwards_arrow : OpamCompat.Uchar.t
-  val downwards_arrow : OpamCompat.Uchar.t
-  val up_down_arrow : OpamCompat.Uchar.t
-  val downwards_double_arrow : OpamCompat.Uchar.t
-  val downwards_black_arrow : OpamCompat.Uchar.t
-  val black_down_pointing_triangle : OpamCompat.Uchar.t
+  val rightwards_arrow : Uchar.t
+  val box_drawings_light_down_and_right : Uchar.t
+  val box_drawings_light_horizontal : Uchar.t
+  val box_drawings_light_vertical : Uchar.t
+  val box_drawings_light_up_and_right : Uchar.t
+  val box_drawings_light_right : Uchar.t
+  val circled_division_slash : Uchar.t
+  val asterisk_operator : Uchar.t
+  val north_east_arrow : Uchar.t
+  val south_east_arrow : Uchar.t
+  val clockwise_open_circle_arrow : Uchar.t
+  val greek_small_letter_lambda : Uchar.t
+  val latin_capital_letter_o_with_stroke : Uchar.t
+  val six_pointed_black_star : Uchar.t
+  val upwards_arrow : Uchar.t
+  val downwards_arrow : Uchar.t
+  val up_down_arrow : Uchar.t
+  val downwards_double_arrow : Uchar.t
+  val downwards_black_arrow : Uchar.t
+  val black_down_pointing_triangle : Uchar.t
+  val collision : Uchar.t
 end
 
 val utf8_symbol:
-  OpamCompat.Uchar.t -> ?alternates:OpamCompat.Uchar.t list -> string -> string
+  Uchar.t -> ?alternates:Uchar.t list -> string -> string
 
 (** Logging *)
 
@@ -93,6 +94,7 @@ val note : ('a, unit, string, unit) format4 -> 'a
 (** Message without prefix, reformat or newline, to stderr (useful to continue
     error messages without repeating "[ERROR]") *)
 val errmsg : ('a, unit, string, unit) format4 -> 'a
+val formatted_errmsg : ?indent:int -> ('a, unit, string, unit) format4 -> 'a
 
 val error_and_exit :
   OpamStd.Sys.exit_reason -> ('a, unit, string, 'b) format4 -> 'a
@@ -113,9 +115,30 @@ val status_line : ('a, unit, string, unit) format4 -> 'a
 (** Erase the status line and restore the cursor to the start of the line *)
 val clear_status : unit -> unit
 
+(** Show a prompt and wait for the user to press anything. *)
+val pause: ('a, unit, string, unit) format4 -> 'a
+
 (** Ask the user to press Y/y/N/n to continue (returns a boolean).
-    Defaults to true (yes) if unspecified *)
-val confirm: ?default:bool -> ('a, unit, string, bool) format4 -> 'a
+    Defaults to true (yes) if unspecified.
+    If [require_unsafe_yes] is true, it automatically answer yes to the
+    question if automatic answering is set to [`unsafe_yes] ; otherwise it will
+    prompt and wait user input if it is set [`all_yes] (interactive). Its
+    default is false. *)
+val confirm:
+  ?require_unsafe_yes:bool -> ?default:bool -> ?name:string ->
+  ('a, unit, string, bool) format4 -> 'a
+
+(** Prompts the user with multiple numbered choices [(answer, message)].
+
+    [unsafe_yes], [yes] are the options to choose if the corresponding global
+    options are set.
+    [no] is the option to choose otherwise, when non interactive, on [escape].
+    [default] is the option to choose on an active empty input ("\n").
+    Max 35 options. *)
+val menu:
+  ?default:'a -> ?unsafe_yes:'a -> ?yes:'a -> no:'a ->
+  options:('a * string) list ->
+  ('b, unit, string, 'a) format4 -> 'b
 
 (** Read some input from the user (returns a string option) *)
 val read: ('a, unit, string, string option) format4 -> 'a
@@ -126,3 +149,30 @@ val read: ('a, unit, string, string option) format4 -> 'a
 val print_table:
   ?cut:[`Wrap of string | `Truncate | `None] -> out_channel -> sep:string ->
   string list list -> unit
+
+(** Tree printing *)
+module Tree : sig
+  type 'elt t
+
+  val value: 'elt t -> 'elt
+  val children: 'elt t -> 'elt t list
+
+  (** Creates a tree node. *)
+  val create: ?children:'a t list -> 'a -> 'a t
+
+  (** The symbols to be used in the tree printer. *)
+  type symbols = {
+    vert: string; (** | *)
+    hor:  string; (** - *)
+    tee:  string; (** |- *)
+    hook: string; (** '- *)
+  }
+
+  (** Returns UTF8 or ASCII tree symbols depending on [utf8 ()]. *)
+  val get_default_symbols: unit -> symbols
+
+  (** Prints the given tree as a Unicode/ASCII art.
+      @param printer may return a multi-line string, but should not return an
+      empty string. *)
+  val print: ?symbols:symbols -> printer:('a -> string) -> 'a t -> unit
+end

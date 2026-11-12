@@ -1,3 +1,5 @@
+.SHELLFLAGS := -eu$(if $(shell (set -o pipefail 2>/dev/null > /dev/null && echo yes)),o pipefail) $(.SHELLFLAGS)
+
 -include ../Makefile.config
 
 ifeq ($(DUNE),)
@@ -14,19 +16,11 @@ endif
 DUNE_PROFILE ?= release
 DUNE_ARGS ?= 
 
-ifndef OPAM
-  OPAM = $(DUNE) exec --no-print-directory --profile=$(DUNE_PROFILE) -- opam
-  OPAM_DEP := $(shell $(DUNE) exec -- which opam)
-endif
-
-TOPICS  = $(shell $(OPAM) help topics)
-TOPICS_ADMIN = cache filter index lint list upgrade
-
-HELPFMT = --help=groff
-
-ifndef OPAM_INSTALLER
-  OPAM_INSTALLER = $(DUNE) exec --no-print-directory --profile=$(DUNE_PROFILE) -- opam-installer
-  OPAM_INSTALLER_DEP := $(shell $(DUNE) exec -- which opam-installer)
+ifeq ($(DUNE_PROFILE_ARG),release)
+  # TODO Replace with --release when we require dune >= 2.5
+  DUNE_PROFILE_ARG = --profile=release
+else
+  DUNE_PROFILE_ARG = --profile=$(DUNE_PROFILE)
 endif
 
 .PHONY: man html pages
@@ -44,7 +38,7 @@ man-html:
 	echo '</head><body>' >>$@/index.html
 	echo '<h1>Opam $(version) man-pages index</h1>' >>$@/index.html
 	echo '<ul>' >>$@/index.html
-	for f in ${MANDIR}/*; do\
+	for f in ${MANDIR}/*.1; do\
 	  man2html -r $$f | sed 1,2d > $@/$$(basename $$f .1).html;\
 	  echo "  <li><a href=\"$$(basename $$f .1).html\">$$(basename $$f .1)</a></li>" >>$@/index.html;\
 	done
@@ -53,8 +47,9 @@ man-html:
 
 html:
 	rm -rf html
-	cd .. && $(DUNE) build --profile=$(DUNE_PROFILE) $(DUNE_ARGS) @doc
+	cd .. && $(DUNE) build $(DUNE_PROFILE_ARG) --root . $(DUNE_ARGS) @doc
 	cp -r ../_build/default/_doc/_html html
+	chmod -R +w html
 	sed 's/%{OPAMVERSION}%/'$(version)'/g' index.html > html/index.html
 # Not to break older links, add manpages to the `ocamldoc` dir
 	mkdir -p html/ocamldoc

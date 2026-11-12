@@ -37,7 +37,7 @@ module VCS = struct
     | None -> mark_prefix
     | Some fragment -> mark_prefix ^ "-" ^ fragment
 
-  let fetch ?cache_dir:_ ?subpath:_ repo_root repo_url =
+  let fetch ?full_fetch:_ ?cache_dir:_ ?subpath:_ repo_root repo_url =
     let src = OpamUrl.base_url repo_url in
     let rev = OpamStd.Option.default "default" repo_url.OpamUrl.hash in
     let mark = mark_from_url repo_url in
@@ -53,8 +53,13 @@ module VCS = struct
     match r.OpamProcess.r_stdout with
     | [] -> Done None
     | full::_ ->
-      if String.length full > 8 then Done (Some (String.sub full 0 8))
-      else Done (Some full)
+      Done (Some full)
+
+  let clean repo_root =
+    hg repo_root ["revert"; "--all"; "--no-backup"]
+    @@> fun r ->
+    OpamSystem.raise_on_process_error r;
+    Done ()
 
   let reset_tree repo_root repo_url =
     let mark = mark_from_url repo_url in
@@ -79,7 +84,7 @@ module VCS = struct
     else
       Done (Some (OpamFilename.of_string patch_file))
 
-  let is_up_to_date repo_root repo_url =
+  let is_up_to_date ?subpath:_ repo_root repo_url =
     let mark = mark_from_url repo_url in
     hg repo_root [ "status"; "--subrepos"; "--rev"; mark ] @@> fun r ->
     OpamSystem.raise_on_process_error r;
@@ -100,7 +105,7 @@ module VCS = struct
     | marks::_ ->
         let marks = OpamStd.String.split marks ' ' in
         let marks =
-            List.filter (OpamStd.String.starts_with ~prefix:mark_prefix) marks
+            List.filter (OpamCompat.String.starts_with ~prefix:mark_prefix) marks
         in
         match marks with
         | mark::_ -> Done (Some mark)
@@ -120,7 +125,7 @@ module VCS = struct
     hg repo_root [ "status"; "--subrepos" ] @@> fun r ->
     OpamSystem.raise_on_process_error r;
     let files =
-      OpamStd.List.filter_map (fun line ->
+      List.filter_map (fun line ->
           match OpamStd.String.split line ' ' with
           | ("A" | "M")::file::[] -> Some file
           | _ -> None) r.OpamProcess.r_stdout

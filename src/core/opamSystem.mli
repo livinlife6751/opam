@@ -18,24 +18,34 @@ exception Command_not_found of string
 
 exception Permission_denied of string
 
-(** raise [Process_error] *)
+(** Raise exception {!Process_error} with the given [result] *)
 val process_error: OpamProcess.result -> 'a
 
-(** raise [Process_error] if the process didn't return 0 *)
+(** Raise exception {!Process_error} with the given [result]
+    if the process didn't return 0 *)
 val raise_on_process_error: OpamProcess.result -> unit
 
 (** Exception raised when a computation in the current process
     fails. *)
 exception Internal_error of string
 
-(** Raise [Internal_error] *)
+(** Raise exception {!Internal_error} with the given string format *)
 val internal_error: ('a, unit, string, 'b) format4 -> 'a
 
-(** [with_tmp_dir fn] executes [fn] in a tempory directory *)
+(** [with_tmp_dir fn] executes [fn] creates a temporary directory and
+    passes its name to [fn]. The directory is always removed on completion. *)
 val with_tmp_dir: (string -> 'a) -> 'a
 
 (** Runs a job with a temp dir that is cleaned up afterwards *)
 val with_tmp_dir_job: (string -> 'a OpamProcess.job) -> 'a OpamProcess.job
+
+(** [with_tmp_file fn] creates a file name in temporary directory and
+    passes it to [fn]. The file is always removed on completion. *)
+val with_tmp_file: (string -> 'a) -> 'a
+
+(** Runs a job with a file in temporary directory that is cleaned up afterwards
+    *)
+val with_tmp_file_job: (string -> 'a OpamProcess.job) -> 'a OpamProcess.job
 
 (** Returns true if the default verbose level for base commands (cp, mv, etc.)
     is reached *)
@@ -43,9 +53,19 @@ val verbose_for_base_commands: unit -> bool
 
 (** {2 Filesystem management} *)
 
+(** Check if directory [dir] is read only.
+    Check access and catch the read-only error ({Unix.EROFS}) and operation not
+    permitted ({Unix.EPERM}).
+    @raise Invalid_argument if the [dir] is not a directory or doesn't exist. *)
+val is_dir_read_only: string -> bool
+
 (** Returns a directory name, in the temporary directory, composed by {i opam}
     (if [prefix] is not set), pid, and random number. *)
 val mk_temp_dir: ?prefix:string -> unit -> string
+
+(** Returns a directory name, in the [~dir], composed by {i opam}
+    (if [prefix] is not set), and a random number. *)
+val mk_unique_dir: dir:string -> ?prefix:string -> unit -> string
 
 (** [copy_file src dst] copies [src] to [dst]. Remove [dst] before the copy
     if it is a link. *)
@@ -56,6 +76,10 @@ val copy_file: string -> string -> unit
     files otherwise *)
 val copy_dir: string -> string -> unit
 
+(** Same as [copy_dir] except it avoids copying VCS directories
+    ([.git], [.hg], [_darcs]) *)
+val copy_dir_except_vcs : string -> string -> unit
+
 val mv: string -> string -> unit
 
 type install_warning = [ `Add_exe          (* [.exe] had to be added *)
@@ -63,6 +87,8 @@ type install_warning = [ `Add_exe          (* [.exe] had to be added *)
                        | `Install_script   (* Installation of script on Windows *)
                        | `Install_unknown  (* Installation of unknown file to bin/libexec *)
                        | `Cygwin           (* Installation of a Cygwin-linked executable *)
+                       | `Msys2            (* Installation of a MSYS2-linked executable *)
+                       | `Tainted of [`Msys2 | `Cygwin] (* Installation of an executable which itself is linked to a Cygwin or MSYS2-linked library *)
                        | `Cygwin_libraries (* Installation of a binary linked to a Cygwin library *)
                        ]
 (** Warnings which come from {!install} *)
@@ -106,6 +132,14 @@ val read: string -> string
     advisory write lock to prevent concurrent reads or writes) *)
 val write: string -> string -> unit
 
+(** [get_files dir] returns the list of files (without prefix) inside the
+    directory [dir]. *)
+val get_files : string -> string list
+
+(** Same as [get_files] except it avoids copying VCS directories
+    ([.git], [.hg], [_darcs]) *)
+val get_files_except_vcs : string -> string list
+
 (** [remove filename] removes [filename]. Works whether [filename] is
     a file or a directory *)
 val remove: string -> unit
@@ -118,11 +152,14 @@ val remove_file: string -> unit
     directory (not for symlinks or other files). *)
 val remove_dir: string -> unit
 
-(** Change the current working directory *)
-val chdir: string -> unit
+(** Removes an empty directory, as well as any empty leading path components.
+    Must be called only on a directory that is known to not have empty parents,
+    only internal opam directory (and not tmp dir). *)
+val rmdir_cleanup : string -> unit
 
-(** [in_dir dir fn] evaluates [fn] in the directory [dir] *)
-val in_dir: string -> (unit -> 'a) -> 'a
+(** [is_reg_dir filename] returns [true] only if [filename] is a directory,
+    exists and is not a symlink. Returns [false] otherwise. *)
+val is_reg_dir: string -> bool
 
 (** Returns the list of files and directories in the given directory (full
     names) *)
@@ -134,11 +171,17 @@ val files_with_links: string -> string list
 
 (** [rec_files dir] returns the list of all files in [dir],
     recursively.
-    Links behaving like directory are crossed. *)
-val rec_files: string -> string list
+    Links behaving like directory are crossed.
+    Exclude VCS directories from selection if [except_vcs] is set to true. Keep
+    them otherwise. *)
+val rec_files: ?except_vcs:bool -> string -> string list
 
 (** Return the list of files in the current directory. *)
 val files: string -> string list
+
+(** Return the list of files in the current directory, inclduing any
+    dangling symlinks. *)
+val files_all_not_dir: string -> string list
 
 (** [rec_dirs dir] return the list list of all directories recursively
     (going through symbolink links). *)
@@ -147,19 +190,24 @@ val rec_dirs: string -> string list
 (** Return the list of directories in the current directory. *)
 val dirs: string -> string list
 
-val dir_is_empty: string -> bool
+(** Returns whether a directory is empty.
+    Returns [None] if the directory could not be found. *)
+val dir_is_empty: string -> bool option
 
 (** [directories_with_links dir] returns the directories in the directory [dir].
-    Links pointing to directory are also returned. *)
-val directories_with_links: string -> string list
+    Links pointing to directory are also returned.
+    Exclude VCS directories from selection if [except_vcs] is set to true. Keep
+    them otherwise. *)
+val directories_with_links: ?except_vcs:bool -> string -> string list
 
 (** Make a comman suitable for OpamProcess.Job. if [verbose], is set,
     command and output will be displayed (at command end for the
     latter, if concurrent commands are running). [name] is used for
     naming log files. [text] is what is displayed in the status line
-    for this command. May raise Command_not_found, unless
-    [resolve_path] is set to false (in which case you can end up
-    with a process error instead) *)
+    for this command.
+
+    @raise Command_not_found, unless [resolve_path] is set to false (in which
+    case you can end up with a process error instead) *)
 val make_command:
   ?verbose:bool -> ?env:string array -> ?name:string -> ?text:string ->
   ?metadata:(string * string) list -> ?allow_stdin:bool -> ?stdout:string ->
@@ -171,39 +219,62 @@ val make_command:
 (** a command is a list of words *)
 type command = string list
 
-(** Test whether a command exists in the environment, and returns it (resolved
-    if found in PATH) *)
+(** As {!OpamStd.Sys.resolve_command}, except the default for [~env] is
+    {!OpamProcess.default_env}. *)
 val resolve_command: ?env:string array -> ?dir:string -> string -> string option
+
+val bin_contains_bash: string -> bool
 
 (** Returns a function which should be applied to arguments for a given command
     by determining if the command is the Cygwin variant of the command. Returns
     the identity function otherwise. *)
 val get_cygpath_function: command:string -> (string -> string) lazy_t
 
+(** Returns a function which should be applied to a path (or a path list), if
+    in a functioning Cygwin or MSYS2 environment, translating the Windows or a
+    Unix path into a Unix path, by calling `cygpath`. Returns the identity
+    function
+    otherwise.
+    [pathlist] argument permit to specify if it is applied to a path or a path
+    list, by giving the `--path` argument in the last case. *)
+val get_cygpath_path_transform: (pathlist:bool -> string -> string) lazy_t
+
+(** [apply_cygpath path] applies the `cygpath` command to [name] using
+    `cygpath -- name`. *)
+val apply_cygpath: string -> string
+
 (** [command cmd] executes the command [cmd] in the correct OPAM
     environment. *)
 val command: ?verbose:bool -> ?env:string array -> ?name:string ->
-  ?metadata:(string * string) list -> ?allow_stdin:bool ->
+  ?metadata:(string * string) list -> ?dir: string -> ?allow_stdin:bool ->
   command -> unit
 
 (** [commands cmds] executes the commands [cmds] in the correct OPAM
     environment. It stops whenever one command fails unless [keep_going] is set
     to [true]. In this case, the first error is re-raised at the end. *)
 val commands: ?verbose:bool -> ?env:string array -> ?name:string ->
-  ?metadata:(string * string) list -> ?keep_going:bool -> command list -> unit
+  ?metadata:(string * string) list -> ?dir: string -> ?keep_going:bool ->
+  command list -> unit
 
 (** [read_command_output cmd] executes the command [cmd] in the
-    correct OPAM environment and return the lines from stdout if the command
+    correct OPAM environment and return the lines from output if the command
     exists normally. If the command does not exist or if the command exited
-    with a non-empty exit-code, throw an error. *)
+    with a non-empty exit-code, throw an error.
+    It returns stdout and stder combiend, unless [ignore_stderr] is st to true.
+    *)
 val read_command_output: ?verbose:bool -> ?env:string array ->
-  ?metadata:(string * string) list ->  ?allow_stdin:bool ->
-  command -> string list
+  ?metadata:(string * string) list -> ?dir: string -> ?allow_stdin:bool ->
+  ?ignore_stderr:bool -> command -> string list
 
 (** END *)
 
-(** Test whether the file is an archive, by looking as its extension *)
+(** Test whether the file is an archive, by looking at its magic number
+    if the file exists, otherwise by looking as its extension *)
 val is_archive: string -> bool
+
+(** Test whether the given path is an archive, only by looking at its
+    extension *)
+val is_archive_from_string: string -> bool
 
 (** [extract ~dir:dirname filename] extracts the archive [filename] into
     [dirname]. [dirname] should not exists and [filename] should
@@ -219,8 +290,6 @@ val extract_in: dir:string -> string -> unit
 
 (** [extract_in_job] is similar to [extract_in], but as a job *)
 val extract_in_job: dir:string -> string -> exn option OpamProcess.job
-
-val make_tar_gz_job: dir:string -> string -> exn option OpamProcess.job
 
 (** Create a directory. Do not fail if the directory already
     exist. *)
@@ -250,9 +319,10 @@ exception Locked
 val release_all_locks: unit -> unit
 
 (** Acquires a lock on the given file.
-    Raises [Locked] if the lock can't be acquired and [dontblock] is set. Raises
-    [OpamStd.Sys.Exit] if [safe_mode] is set and a write lock is required. Also
-    raises Unix errors if the lock file can't be opened. *)
+
+    @raise Locked if the lock can't be acquired and [dontblock] is set
+    @raise OpamStd.Sys.Exit if [safe_mode] is set and a write lock is required.
+    @raise Unix.Unix_error if the lock file can't be opened. *)
 val flock: [< lock_flag ] -> ?dontblock:bool -> string -> lock
 
 (** Updates an existing lock to the given level. Raises the same exceptions as
@@ -272,15 +342,11 @@ val lock_isatleast: [< lock_flag ] -> lock -> bool
 (** Returns the current kind of the lock *)
 val get_lock_flag: lock -> lock_flag
 
-(** Returns the underlying fd for the lock or raises Not_found for `No_lock *)
+(** Returns the underlying fd for the lock
+    @raise Not_found for [`No_lock] *)
 val get_lock_fd: lock -> Unix.file_descr
 
 (** {2 Misc} *)
-
-(** Apply a patch file in the current directory. If [preprocess] is set to
-    false, there is no CRLF translation. Returns the error if the patch didn't
-    apply. *)
-val patch: ?preprocess:bool -> dir:string -> string -> exn option OpamProcess.job
 
 (** Returns the end-of-line encoding style for the given file. [None] means that
     either the encoding of line endings is mixed, or the file contains no line
@@ -288,29 +354,17 @@ val patch: ?preprocess:bool -> dir:string -> string -> exn option OpamProcess.jo
     Otherwise it returns [Some true] if all endings are encoded CRLF. *)
 val get_eol_encoding : string -> bool option
 
-(** [translate_patch ~dir input_patch output_patch] writes a copy of
-    [input_patch] to [output_patch] as though [input_patch] had been applied in
-    [dir]. The patch is rewritten such that if text files have different line
-    endings then the patch is transformed to patch using the encoding on disk.
-    In particular, this means that patches generated against Unix checkouts of
-    Git sources will correctly apply to Windows checkouts of the same sources.
-*)
-val translate_patch: dir:string -> string -> string -> unit
-
 (** Create a temporary file in {i ~/.opam/logs/<name>XXX}, if [dir] is not set.
     ?auto_clean controls whether the file is automatically deleted when opam
     terminates (default: [true]). *)
 val temp_file: ?auto_clean:bool -> ?dir:string -> string -> string
-
-(** Print stats *)
-val print_stats: unit -> unit
 
 (** Registers an exception printer that adds some OPAM version info, and details
     on process and Unix errors *)
 val register_printer: unit -> unit
 
 (** Initialises signal handlers, catch_break and some exception printers. The
-    lib may not perform properly without this if [Sys.catch_break] isn't set
+    lib may not perform properly without this if {!Sys.catch_break} isn't set
     and SIGPIPE isn't handled (with a no-op) *)
 val init: unit -> unit
 

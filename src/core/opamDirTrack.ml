@@ -8,7 +8,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-open OpamCompat
 open OpamStd.Op
 open OpamProcess.Job.Op
 
@@ -48,6 +47,22 @@ let to_string t =
       Printf.sprintf "%s of %s"
         (String.capitalize_ascii (string_of_change change)) f)
     (SM.bindings t)
+
+let to_summary_string t =
+  let freq_table =
+    SM.fold (fun _ change ->
+        SM.strict_union (+) (SM.singleton (string_of_change ~full:false change) 1))
+      t
+      SM.empty
+  in
+  let freq_list =
+    OpamStd.List.concat_map ~left:" (" ~right:")" ~nil:"" "; " (fun (change, freq) ->
+        Printf.sprintf "%s: %d" change freq)
+      (SM.bindings freq_table)
+  in
+  Printf.sprintf "%d items%s"
+    (SM.cardinal t)
+    freq_list
 
 (** uid, gid, perm *)
 type perms = int * int * int
@@ -101,7 +116,7 @@ let item_digest = function
   | _perms, Special (a,b) -> Printf.sprintf "S:%d:%d" a b
 
 let is_precise_digest d =
-  not (OpamStd.String.starts_with ~prefix:"F:S" d)
+  not (OpamCompat.String.starts_with ~prefix:"F:S" d)
 
 let track_t to_track ?(except=OpamFilename.Base.Set.empty) job_f =
   let module SM = OpamStd.String.Map in
@@ -135,13 +150,27 @@ let track_t to_track ?(except=OpamFilename.Base.Set.empty) job_f =
       fun () -> make_index_topdir SM.empty (OpamFilename.Dir.to_string dir) ""
     | `Paths (prefix, files) ->
       fun () ->
+        let prefix = OpamFilename.Dir.to_string prefix in
         List.fold_left (fun acc f ->
-            let prefix = OpamFilename.Dir.to_string prefix in
-            let rel = Filename.concat prefix f in
-            let item = item_of_filename_opt rel in
-            match item with
-            | None -> acc
-            | Some item -> SM.add f item acc)
+            let _, acc =
+              List.fold_left (fun (path, acc) dir ->
+                  let path =
+                    match path with
+                    | Some path -> Filename.concat path dir
+                    | None -> dir
+                  in
+                  let rel = Filename.concat prefix path in
+                  let item = item_of_filename_opt rel in
+                  let acc =
+                    match item with
+                    | None -> acc
+                    | Some item -> SM.add path item acc
+                  in
+                  Some path, acc)
+                (None, acc)
+                (Re.(split (compile (rep1 (str Filename.dir_sep)))) f)
+            in
+            acc)
           SM.empty files
   in
   let scan_timer = OpamConsole.timer () in
@@ -228,12 +257,12 @@ let revert ?title ?(verbose=OpamConsole.verbose()) ?(force=false)
             (already, fname::modified, nonempty, cannot)
           else if cur_item_ct = Some Dir then
             let d = OpamFilename.Dir.of_string f in
-            if OpamFilename.dir_is_empty d then
+            if OpamFilename.dir_is_empty d = Some true then
               (rmdir d; acc)
             else
               let nonempty =
                 if List.exists
-                    (OpamStd.String.starts_with ~prefix:fname) nonempty
+                    (OpamCompat.String.starts_with ~prefix:fname) nonempty
                 then nonempty else fname::nonempty
               in
               (already, modified, nonempty, cannot)

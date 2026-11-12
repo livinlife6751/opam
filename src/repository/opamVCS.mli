@@ -27,8 +27,17 @@ module type VCS = sig
   (** Fetch changes from upstream. This is supposed to put the changes
       in a staging area.
       Be aware that the remote URL might have been changed, so make sure
-      to update accordingly. *)
-  val fetch: ?cache_dir:dirname -> ?subpath:string -> dirname -> url -> unit OpamProcess.job
+      to update accordingly.
+
+      If [full_fetch] is set to false, VCS repository is retrieved with shallow
+      history (by default, full history).
+      If [cache_dir] is given, the directory is used by VCS tool as a its cache
+      directory.
+      If [subpath] is given, only that [subpath] of the url is retrieved. *)
+  val fetch:
+    ?full_fetch:bool -> ?cache_dir:dirname -> ?subpath:subpath
+    -> dirname -> url
+    -> unit OpamProcess.job
 
   (** Reset the master branch of the repository to match the remote repository
       state. This might still fetch more data (git submodules...), so is
@@ -45,7 +54,7 @@ module type VCS = sig
 
   (** Returns true if the last fetched state is equal to the current, on-disk
       state *)
-  val is_up_to_date: dirname -> url -> bool OpamProcess.job
+  val is_up_to_date: ?subpath:subpath -> dirname -> url -> bool OpamProcess.job
 
   (** Returns an backend-specific identifier for the current revision. *)
   val revision: dirname -> string option OpamProcess.job
@@ -58,21 +67,25 @@ module type VCS = sig
   val vc_dir: dirname -> dirname
 
   (** Returns the currently selected branch handle. It should be valid as the
-      [hash] field of [OpamUrl.t]. *)
+      [hash] field of {!OpamUrl.t}. *)
   val current_branch: dirname -> string option OpamProcess.job
 
   (** Returns true if the working tree state is different from the state
-      recorded in the VCS as current. This differs from [is_up_to_date], which
+      recorded in the VCS as current. This differs from {!is_up_to_date}, which
       compares specifically to the last fetched state. This should always be
       [false] after [reset] has been called. *)
-  val is_dirty: ?subpath:string -> dirname -> bool OpamProcess.job
+  val is_dirty: ?subpath:subpath -> dirname -> bool OpamProcess.job
 
   (** Returns the list of files under version control, modified in the working
-      tree but not comitted *)
+      tree but not committed *)
   val modified_files: dirname -> string list OpamProcess.job
 
+  (* Returns associated remote url, if found *)
   val get_remote_url: ?hash:string -> dirname -> url option OpamProcess.job
+
+  (* Remove uncommitted changes *)
+  val clean: dirname -> unit OpamProcess.job
 end
 
 (** Create a backend from a [VCS] implementation. *)
-module Make(VCS : VCS) : OpamRepositoryBackend.S [@@ocaml.warning "-67"] (* TODO: Remove this once we get past OCaml 4.02 *)
+module Make(_ : VCS) : OpamRepositoryBackend.S

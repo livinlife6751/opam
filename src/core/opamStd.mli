@@ -18,24 +18,22 @@ module type SET = sig
 
   include Set.S
 
-  val map: (elt -> elt) -> t -> t
-
   val is_singleton: t -> bool
 
-  (** Returns one element, assuming the set is a singleton. Raises [Not_found]
-      on an empty set, [Failure] on a non-singleton. *)
+  (** Returns one element, assuming the set is a singleton.
+      @raise Not_found on an empty set
+      @raise Failure on a non-singleton *)
   val choose_one : t -> elt
 
-  val choose_opt: t -> elt option
-
   val of_list: elt list -> t
+  val to_list_map: (elt -> 'b) -> t -> 'b list
   val to_string: t -> string
-  val to_json: t -> OpamJson.t
-  val of_json: OpamJson.t -> t option
+  val to_json: t OpamJson.encoder
+  val of_json: t OpamJson.decoder
   val find: (elt -> bool) -> t -> elt
   val find_opt: (elt -> bool) -> t -> elt option
 
-  (** Raises Failure in case the element is already present *)
+  (** @raise Failure in case the element is already present *)
   val safe_add: elt -> t -> t
 
   (** Accumulates the resulting sets of a function of elements until a fixpoint
@@ -43,8 +41,8 @@ module type SET = sig
   val fixpoint: (elt -> t) -> t -> t
 
   (** [map_reduce f op t] applies [f] to every element of [t] and combines the
-      results using associative operator [op]. Raises [Invalid_argument] on an
-      empty set, or returns [default] if it is defined. *)
+      results using associative operator [op].
+      @raise Invalid_argument on an empty set if [default] is not defined *)
   val map_reduce: ?default:'a -> (elt -> 'a) -> ('a -> 'a -> 'a) -> t -> 'a
 
   module Op : sig
@@ -60,39 +58,32 @@ end
 (** Maps with extended interface *)
 module type MAP = sig
 
-  include Map.S
+  include OpamCompat.MAP
 
   val to_string: ('a -> string) -> 'a t  -> string
-  val to_json: ('a -> OpamJson.t) -> 'a t -> OpamJson.t
-  val of_json: (OpamJson.t -> 'a option) -> OpamJson.t -> 'a t option
+  val to_json: 'a OpamJson.encoder -> 'a t OpamJson.encoder
+  val of_json: 'a OpamJson.decoder -> 'a t OpamJson.decoder
   val keys: 'a t -> key list
   val values: 'a t -> 'a list
-  val find_opt: key -> 'a t -> 'a option
-  val choose_opt: 'a t -> (key * 'a) option
 
-  (** A key will be in the union of [m1] and [m2] if it is appears
+  (** A key will be in the strict union of [m1] and [m2] if it is appears
       either [m1] or [m2], with the corresponding value. If a key
       appears in both [m1] and [m2], then the resulting value is built
       using the function given as argument. *)
-  val union: ('a -> 'a -> 'a) -> 'a t -> 'a t -> 'a t
+  val strict_union: ('a -> 'a -> 'a) -> 'a t -> 'a t -> 'a t
 
   val is_singleton: 'a t -> bool
 
   val of_list: (key * 'a) list -> 'a t
 
-  (** Raises Failure in case the element is already present *)
+  (** @raise Failure in case the element is already present *)
   val safe_add: key -> 'a -> 'a t -> 'a t
 
-  (** [update k f zero map] updates the binding of [k] in [map] using function
-      [f], applied to the current value bound to [k] or [zero] if none *)
-  val update: key -> ('a -> 'a) -> 'a -> 'a t -> 'a t
-
   (** [map_reduce f op t] applies [f] to every binding of [t] and combines the
-      results using associative operator [op]. Raises [Invalid_argument] on an
-      empty map, or returns [default] if it is defined. *)
+      results using associative operator [op].
+      @raise Invalid_argument on an empty map if [default] is not defined *)
   val map_reduce:
     ?default:'b -> (key -> 'a -> 'b) -> ('b -> 'b -> 'b) -> 'a t -> 'b
-
 end
 
 (** A signature for handling abstract keys and collections thereof *)
@@ -100,10 +91,12 @@ module type ABSTRACT = sig
 
   type t
 
+  val compare: t -> t -> int
+  val equal: t -> t -> bool
   val of_string: string -> t
   val to_string: t -> string
-  val to_json: t -> OpamJson.t
-  val of_json: OpamJson.t -> t option
+  val to_json: t OpamJson.encoder
+  val of_json: t OpamJson.decoder
 
   module Set: SET with type elt = t
   module Map: MAP with type key = t
@@ -117,8 +110,8 @@ module AbstractString : ABSTRACT with type t = string
 module type OrderedType = sig
   include Set.OrderedType
   val to_string: t -> string
-  val to_json: t -> OpamJson.t
-  val of_json: OpamJson.t -> t option
+  val to_json: t OpamJson.encoder
+  val of_json: t OpamJson.decoder
 end
 
 module Set: sig
@@ -142,10 +135,6 @@ module IntSet: SET with type elt = int
 (** {2 Utility modules extending the standard library on base types} *)
 
 module Option: sig
-  val map: ('a -> 'b) -> 'a option -> 'b option
-
-  val iter: ('a -> unit) -> 'a option -> unit
-
   val default: 'a -> 'a option -> 'a
 
   val default_map: 'a option -> 'a option -> 'a option
@@ -154,13 +143,9 @@ module Option: sig
 
   val map_default: ('a -> 'b) -> 'b -> 'a option -> 'b
 
-  val compare: ('a -> 'a -> int) -> 'a option -> 'a option -> int
+  val equal_some : ('a -> 'a -> bool) -> 'a -> 'a option -> bool
 
   val to_string: ?none:string -> ('a -> string) -> 'a option -> string
-
-  val to_list: 'a option -> 'a list
-
-  val some: 'a -> 'a option
 
   val none: 'a -> 'b option
 
@@ -178,27 +163,19 @@ end
 
 module List : sig
 
-  val cons: 'a -> 'a list -> 'a list
-
-  (** Convert list items to string and concat. [sconcat_map sep f x] is equivalent
-      to String.concat sep (List.map f x) but tail-rec. *)
+  (** Convert list items to string and concat. [concat_map sep f x] is equivalent
+      to [String.concat sep (List.map f x)] but tail-rec. *)
   val concat_map:
     ?left:string -> ?right:string -> ?nil:string -> ?last_sep:string ->
     string -> ('a -> string) -> 'a list -> string
 
-  (** Like [List.find], but returning option instead of raising *)
-  val find_opt: ('a -> bool) -> 'a list -> 'a option
-
   val to_string: ('a -> string) -> 'a list -> string
 
   (** Removes consecutive duplicates in a list *)
-  val remove_duplicates: 'a list -> 'a list
+  val remove_duplicates: ('a -> 'a -> bool) -> 'a list -> 'a list
 
   (** Sorts the list, removing duplicates *)
   val sort_nodup: ('a -> 'a -> int) -> 'a list -> 'a list
-
-  (** Filter and map *)
-  val filter_map: ('a -> 'b option) -> 'a list -> 'b list
 
   (** Retrieves [Some] values from a list *)
   val filter_some: 'a option list -> 'a list
@@ -208,6 +185,10 @@ module List : sig
       @raise Not_found if all of them yield [None] *)
   val find_map: ('a -> 'b option) -> 'a list -> 'b
 
+  (** Like {!find_map},
+  but returns [Some _] if succeeded and [None] if failed. *)
+  val find_map_opt: ('a -> 'b option) -> 'a list -> 'b option
+
   (** Insert a value in an ordered list *)
   val insert: ('a -> 'a -> int) -> 'a -> 'a list -> 'a list
 
@@ -215,19 +196,42 @@ module List : sig
       end if index < 0 or > length respectively). Not tail-recursive *)
   val insert_at: int -> 'a -> 'a list -> 'a list
 
-  (** Like [List.find], but returning option instead of raising *)
-  val assoc_opt: 'a -> ('a * 'b) list -> 'b option
+  (** Like {!List.mem} with an equality function. *)
+  val mem: ('a -> 'a -> bool) -> 'a -> 'a list -> bool
 
-  (** Like [List.assoc], but as an option, and also returns the list with the
-      binding removed, e.g. equivalent to
-      [(List.assoc_opt x l, List.remove_assoc x l)]
+  (** Like {!List.assoc} with an equality function. *)
+  val assoc: ('a -> 'a -> bool) -> 'a -> ('a * 'b) list -> 'b
+
+  (** Like {!assoc}, but returning option instead of raising [Not_found] *)
+  val assoc_opt: ('a -> 'a -> bool) -> 'a -> ('a * 'b) list -> 'b option
+
+  (** Like {!assoc}, but as an option, and also returns the list with the
+      binding removed, e.g. equivalent to [(assoc_opt x l, remove_assoc x l)]
       (but tail-recursive and more efficient) *)
-  val pick_assoc: 'a -> ('a * 'b) list -> 'b option * ('a * 'b) list
+  val pick_assoc:
+    ('a -> 'a -> bool) -> 'a -> ('a * 'b) list -> 'b option * ('a * 'b) list
+
+  (** Like {!assoc}, but returns a boolean instead of associated value *)
+  val mem_assoc: ('a -> 'a -> bool) -> 'a -> ('a * 'b) list -> bool
+
+  (** [remove_assoc eq k l] removes first association of [k] from list [l]
+      (tail-recursive). *)
+  val remove_assoc:
+    ('a -> 'a -> bool) -> 'a -> ('a * 'b) list -> ('a * 'b) list
 
   (** [update_assoc key value list] updates the first value bound to [key] in
       the associative list [list], or appends [(key, value)] if the key is not
       bound. *)
-  val update_assoc: 'a -> 'b -> ('a * 'b) list -> ('a * 'b) list
+  val update_assoc:
+    ('a -> 'a -> bool) -> 'a -> 'b -> ('a * 'b) list -> ('a * 'b) list
+
+  (** Like {!pick_assoc}, but with a test function that takes a list element *)
+  val pick: ('a -> bool) -> 'a list -> 'a option * 'a list
+end
+
+module Char : sig
+
+  val is_whitespace : char -> bool
 
 end
 
@@ -247,43 +251,55 @@ module String : sig
 
   (** {3 Checks} *)
 
-  val starts_with: prefix:string -> string -> bool
-  val ends_with: suffix:string -> string -> bool
-  val contains_char: string -> char -> bool
   val contains: sub:string -> string -> bool
   val exact_match: Re.re -> string -> bool
   val find_from: (char -> bool) -> string -> int -> int
 
-  (** Like [String.compare], but with lowercase/uppercase variants ordered next
-      to each other (still considered not equal though) *)
+  (** Like {!Stdlib.String.compare}, but with lowercase/uppercase variants
+      ordered next to each other (still considered not equal though) *)
   val compare_case: string -> string -> int
+
+  (** Case insensitive version of [String.compare] *)
+  val case_insensitive_compare: string -> string -> int
+
+  (** Case insensitive version of [String.equal] *)
+  val case_insensitive_equal: string -> string -> bool
 
   (** {3 Manipulation} *)
 
-  val map: (char -> char) -> string -> string
   val strip: string -> string
   val strip_right: string -> string
   val sub_at: int -> string -> string
   val remove_prefix: prefix:string -> string -> string
   val remove_suffix: suffix:string -> string -> string
 
+  (** [is_prefix_of from full str] returns true if [str] if a prefix of [full],
+      with at least [from] first characters *)
+  val is_prefix_of: from:int -> full:string -> string -> bool
+
   (** {4 Transformations} *)
 
   (** Cut a string at the first occurrence of the given char *)
   val cut_at: string -> char -> (string * string) option
 
-  (** Same as [cut_at], but starts from the right *)
+  (** Same as {!cut_at}, but starts from the right *)
   val rcut_at: string -> char -> (string * string) option
 
   (** Split a string at occurrences of a given characters. Empty strings are
       skipped. *)
   val split: string -> char -> string list
 
-  (** The same as [split], but keep empty strings (leading, trailing or between
+  (** The same as {!split}, but keep empty strings (leading, trailing or between
       contiguous delimiters) *)
   val split_delim: string -> char -> string list
 
-  val fold_left: ('a -> char -> 'a) -> 'a -> string -> 'a
+  (** Splits a variable at the given character, but allowing double-quote
+      characters to protect the delimiter.
+
+      [split_quoted "foo\";\"bar;baz" ';' = ["foo;bar"; "baz"]] *)
+  val split_quoted: string -> char -> string list
+
+  val is_hex: string -> bool
 
 end
 
@@ -332,7 +348,7 @@ module Exn : sig
   (** To use when catching default exceptions: ensures we don't catch fatal errors
       like C-c. try-with should _always_ (by decreasing order of preference):
       - either catch specific exceptions
-      - or re-raise the same exception (preferably with [Exn.finalise])
+      - or re-raise the same exception (preferably with {!Exn.finalise})
       - or call this function on the caught exception *)
   val fatal: exn -> unit
 
@@ -349,7 +365,7 @@ module Exn : sig
   val finalise: exn -> (unit -> unit) -> 'a
 
   (** Execute the given continuation, then run the finaliser before returning
-      the result. If an exception is raised, call [finalise] with the given
+      the result. If an exception is raised, call {!finalise} with the given
       finaliser. *)
   val finally: (unit -> unit) -> (unit -> 'a) -> 'a
 
@@ -358,6 +374,31 @@ end
 (** {2 Manipulation and query of environment variables} *)
 
 module Env : sig
+
+  (** {3 Raw array functions} *)
+
+  type raw = string array
+
+  (** Same as {!Unix.environment} *)
+  val raw_env: unit -> raw
+
+  (** [get_from_array array key] returns the value of the first element
+      of [array] associated with [key]. Returns [None] if nothing was found. *)
+  val get_from_array: raw -> string -> string option
+
+  (** [add_and_replace array (key, value)] returns a fresh array containing
+      at least [key=value] and [array] where all the elements matching [key]
+      will be replaced by [key=value] as well.
+
+      This makes sure any applications will always associate [key] with [value]
+      as per POSIX.1-2024:
+      > If more than one string in an environment of a process has the same name,
+      > the consequences are undefined.
+      https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap08.html *)
+  val add_and_replace: raw -> (string * string) -> raw
+
+  (** {3 Generic functions} *)
+
   (** Remove from a c-separated list of string the ones with the given prefix *)
   val reset_value: prefix:string -> char -> string -> string list
 
@@ -368,12 +409,6 @@ module Env : sig
   *)
   val cut_value: prefix:string -> char -> string -> string list * string list
 
-  val get: string -> string
-
-  val getopt: string -> string option
-
-  val list: unit -> (string * string) list
-
   (** Utility function for shell single-quoted strings. In most shells,
       backslash escapes are not allowed and a single quote needs to be replaced
       by [quote double-quote quote double-quote quote] (close the single-quoted
@@ -382,6 +417,57 @@ module Env : sig
       [using_backslashes] to escape both quotes and backslashes using
       backslashes *)
   val escape_single_quotes: ?using_backslashes:bool -> string -> string
+
+  (** Utility function for PowerShell strings. *)
+  val escape_powershell: string -> string
+
+  (** {3 Environment variable handling} *)
+
+  (** Environment variable names. Windows has complicated semantics for
+      environment variables. The retrieval functions are case insensitive, but
+      it's "legal" for the environment block to contain entries which differ
+      only by case. If environment variables are set entirely using CRT or Win32
+      API functions, then there isn't usually a problem, the issue arises when
+      creating a program where the environment block is instead passed. In this
+      model, it's very easy to end up with two bindings in the same block. When
+      dealing with Windows programs, this will mostly be transparent, but it's a
+      problem with Cygwin which actively allows "duplicate" entries which differ
+      by case only and implements Posix semantics on top of this. The problem is
+      constantly with us thanks to the use of PATH on Unix, and Path on Windows!
+      opam tries to ensure that environment variables are looked up according to
+      the OS semantics (so case insensitively on Windows) and OpamEnv goes to
+      some trouble to ensure that updates to environment variables are case
+      preserving (i.e. PATH+=foo gets transformed to Path+=foo if Path exists
+      in the environment block).
+
+      Key to this is not accidentally treating environment variable names as
+      strings, without using the appropriate comparison functions. Name.t
+      represents environment variable names as private strings, providing
+      comparison operators to handle them, and still allowing the possibility
+      to coerce them to strings.
+      *)
+  module Name : sig
+    include ABSTRACT with type t = private string
+
+    val equal_string: t -> string -> bool
+
+  end
+
+  val get: string -> string
+
+  val getopt: string -> string option
+
+  val getopt_full: Name.t -> Name.t * string option
+
+  val list: unit -> (Name.t * string) list
+
+  (** [cyg_env ~env ~cygbin ~git_location] returns [env] environment with its
+      PATH variable updated with [git_location] and [cygbin] at the beginning,
+      ie PATH=<git_location>:<cygbin>:$PATH. Usual `env` argument is
+      `OpamStd.Env.raw_env`. *)
+  val cyg_env:
+    env:string array -> cygbin:string -> git_location:string option
+    -> string array
 end
 
 (** {2 System query and exit handling} *)
@@ -416,30 +502,54 @@ module Sys : sig
           | DragonFly
           | Cygwin
           | Win32
+          | Haiku
           | Unix
           | Other of string
 
   (** Queried lazily *)
   val os: unit -> os
 
-  (** The output of the command "uname", with the given argument. Memoised. *)
-  val uname: string -> string option
+  (** The output of the command "uname -U". FreeBSD only. Reasoning:
+      https://github.com/ocaml/opam/pull/4274#issuecomment-659280485 *)
+  val get_freebsd_version: unit -> string option
+
+  (** The output of the command "getconf LONG_BIT". *)
+  val get_long_bit: unit -> string option
+
+  (** The memoized result of the uname function from the C standard library *)
+  val uname : unit -> OpamStubs.uname
 
   (** Append .exe (only if missing) to executable filenames on Windows *)
   val executable_name : string -> string
 
+  (** Remove .exe (if present) from an executable filename on Windows *)
+  val chop_exe_suffix : string -> string
+
   (** The different families of shells we know about *)
+  type powershell_host = Powershell_pwsh | Powershell
   type shell = SH_sh | SH_bash | SH_zsh | SH_csh | SH_fish
+    | SH_pwsh of powershell_host | SH_cmd
+
+  (** List of all supported shells *)
+  val all_shells : shell list
 
   (** Guess the shell compat-mode *)
   val guess_shell_compat: unit -> shell
 
-  (** Guess the location of .profile *)
-  val guess_dot_profile: shell -> string
+  (** Guess the location of .profile. Returns None if the shell doesn't
+      support the concept of a .profile file. *)
+  val guess_dot_profile: shell -> string option
+
+  (** Guess the location of the .profile file for bash. *)
+  val guess_bash_dot_profile : unit -> string
 
   (** The separator character used in the PATH variable (varies depending on
       OS) *)
   val path_sep: char
+
+  (** [true] if a character may be used in a filename, depending on the OS.
+      For example, on Windows, `:` and `?` can't be in the name. *)
+  val is_valid_basename_char: char -> bool
 
   (** Splits a PATH-like variable separated with [path_sep]. More involved than
       it seems, because there may be quoting on Windows. By default, it returns
@@ -447,14 +557,45 @@ module Sys : sig
       Optional argument [clean] permits to keep those empty strings. *)
   val split_path_variable: ?clean:bool -> string -> string list
 
+  (** Test whether a command exists in the environment, and returns it (resolved
+      if found in PATH). [~env] defaults to {!Env.raw_env}. *)
+  val resolve_command: ?env:string array -> ?dir:string -> string ->
+    [ `Cmd of string | `Denied | `Not_found ]
+
+  (** Search for an arbitrary file in PATH. Unlike {!resolve_command}, no
+      transformations take place on the name in Windows (i.e. .exe, etc. is
+      never appended) and no executable check takes place. The name passed
+      must be a basename (no directory component). *)
+  val resolve_in_path: ?env:string array -> string -> string option
+
   (** For native Windows builds, returns [`Cygwin] if the command is a Cygwin-
-      compiled executable, [`CygLinked] if the command links to a library which is
-      itself Cygwin-compiled or [`Native] otherwise.
+      compiled executable, [`Msys2] if the command is a MSYS2-compiled
+      executable, and [`Tainted of [ `Msys2 | `Cygwin ]] if the command links
+      to a library which is itself Cygwin- or MSYS2-compiled, or [`Native]
+      otherwise.
 
-      Note that this returns [`Native] on a Cygwin-build of opam!
+      If supplied, [~search_in_first] specifies a directory which should be
+      searched for cygcheck prior to searching the current PATH.
 
-      Both cygcheck and an unqualified command will be resolved using the current PATH. *)
-  val is_cygwin_variant: string -> [ `Native | `Cygwin | `CygLinked ]
+      If the command given is not an absolute path, it too is resolved in the
+      current PATH.
+
+      If cygcheck cannot be resolved in PATH, or when running the Cygwin build
+      of opam, the function returns `Native. *)
+  val get_windows_executable_variant: ?search_in_first:string ->
+    string -> [ `Native | `Cygwin | `Tainted of [ `Msys2 | `Cygwin] | `Msys2 ]
+
+  (** Behaviour is largely as {!get_windows_executable_variant} but where MSYS2
+      and Cygwin are seen as equivalent.
+
+      For native Windows builds, returns [`Cygwin] if the command is a Cygwin-
+      or Msys2- compiled executable, and [`CygLinked] if the command links to a
+      library which is itself Cygwin/Msys2-compiled, or [`Native] otherwise. *)
+  val get_cygwin_variant:
+    ?search_in_first:string -> string -> [ `Native | `Cygwin | `CygLinked ]
+
+  (** Returns true if [get_cygwin_variant] is [`Cygwin] *)
+  val is_cygwin_variant: ?search_in_first:string -> string -> bool
 
   (** {3 Exit handling} *)
 
@@ -474,7 +615,7 @@ module Sys : sig
       [Unix.execvpe]. *)
   exception Exec of string * string array * string array
 
-  (** Raises [Exit i] *)
+  (** Raise exception {!Exit} [i] *)
   (* val exit: int -> 'a *)
 
   type exit_reason =
@@ -487,7 +628,7 @@ module Sys : sig
 
   val get_exit_code : exit_reason -> int
 
-  (** Raises [Exit], with the code associated to the exit reason *)
+  (** Raise exception {!Exit}, with the code associated to the exit reason *)
   val exit_because: exit_reason -> 'a
 
   (**/**)
@@ -507,7 +648,7 @@ module Win32 : sig
 
   val set_parent_pid : int32 -> unit
   (** Change which the pid written to by {!parent_putenv}. This function cannot
-      be called after [parent_putenv]. *)
+      be called after {!parent_putenv}. *)
 
   val parent_putenv : string -> string -> bool
   (** Update an environment variable in the parent (i.e. shell) process's
@@ -522,12 +663,6 @@ end
 (** {2 General use infix function combinators} *)
 
 module Op: sig
-
-  (** Function application (with lower priority) (predefined in OCaml 4.01+) *)
-  val (@@): ('a -> 'b) -> 'a -> 'b
-
-  (** Pipe operator -- reverse application (predefined in OCaml 4.01+) *)
-  val (|>): 'a -> ('a -> 'b) -> 'b
 
   (** Function composition : (f @* g) x =~ f (g x) *)
   val (@*): ('b -> 'c) -> ('a -> 'b) -> 'a -> 'c
@@ -545,6 +680,8 @@ module Config : sig
 
   type when_ = [ `Always | `Never | `Auto ]
   type when_ext = [ `Extended | when_ ]
+  type answer = [ `unsafe_yes | `all_yes | `all_no | `ask ]
+  type yes_answer = [ `unsafe_yes | `all_yes ]
 
   (* Parse a envrionement variable boolean value *)
   val bool_of_string: string -> bool option
@@ -556,13 +693,15 @@ module Config : sig
   val env_int: env_var -> int option
 
   type level = int
-  (* Like [env_int], but accept boolean values for 0 and 1 *)
+  (* Like {!env_int}, but accept boolean values for 0 and 1 *)
   val env_level: env_var -> level option
 
   type sections = int option String.Map.t
   val env_sections: env_var -> sections option
 
   val env_string: env_var -> string option
+
+  val env_string_list : env_var -> string list option
 
   val env_float: env_var -> float option
 
@@ -571,6 +710,10 @@ module Config : sig
   val env_when_ext: env_var -> when_ext option
 
   val resolve_when: auto:(bool Lazy.t) -> when_ -> bool
+
+  val env_answer: env_var -> answer option
+
+  val auto_answer: env_var -> (string * answer) list option
 
   module type Sig = sig
 
@@ -613,10 +756,28 @@ module Config : sig
   (* Opam environment variables handling *)
   module E : sig
     type t = ..
+    type t += REMOVED
     val find: (t -> 'a option) -> 'a
-    val value: (t -> 'a option) -> (unit ->'a option)
+    (* Lazy *)
+    val value: (t -> 'a option) -> (unit -> 'a option)
+    (* Not lazy *)
+    val value_t: (t -> 'a option) -> 'a option
     val update: t -> unit
     val updates: t list -> unit
   end
 
+end
+
+(** {2 Polymorphic comparison functions}
+    We use this module in opam codebase to flag polymorphic comparison usage.
+*)
+module Compare : sig
+  val compare: 'a -> 'a -> int
+  val equal: 'a -> 'a -> bool
+  val (=): 'a -> 'a -> bool
+  val (<>): 'a -> 'a -> bool
+  val (<): 'a -> 'a -> bool
+  val (>): 'a -> 'a -> bool
+  val (<=): 'a -> 'a -> bool
+  val (>=): 'a -> 'a -> bool
 end

@@ -1,13 +1,15 @@
 opam-version: "2.0"
-version: "2.1.0~beta4"
-synopsis: "Format library for opam 2.1"
+version: "2.7.0~alpha1~dev"
+synopsis: "Format library for opam 2.6"
 description: """
 Definition of opam datastructures and its file interface.
 """
 maintainer: "opam-devel@lists.ocaml.org"
 authors: [
+  "David Allsopp <david@tarides.com>"
   "Vincent Bernardoff <vb@luminar.eu.org>"
   "Raja Boujbel <raja.boujbel@ocamlpro.com>"
+  "Kate Deplaix <kit-ty-kate@exn.st>"
   "Roberto Di Cosmo <roberto@dicosmo.org>"
   "Thomas Gazagnaire <thomas@gazagnaire.org>"
   "Louis Gesbert <louis.gesbert@ocamlpro.com>"
@@ -20,14 +22,14 @@ authors: [
 homepage: "https://opam.ocaml.org"
 bug-reports: "https://github.com/ocaml/opam/issues"
 dev-repo: "git+https://github.com/ocaml/opam.git"
+license: "LGPL-2.1-only WITH OCaml-LGPL-linking-exception"
 build: [
   ["./configure" "--disable-checks" "--prefix" prefix]
   ["dune" "build" "-p" name "-j" jobs]
 ]
 depends: [
-  "ocaml" {>= "4.02.3"}
+  "ocaml" {>= "4.11.0"}
+  "dune" {>= "2.8.0"}
   "opam-core" {= version}
-  "opam-file-format" {>= "2.1.2"}
-  "re" {>= "1.9.0"}
-  "dune" {>= "1.11.0"}
+  "opam-file-format" {>= "2.1.4"}
 ]

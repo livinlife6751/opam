@@ -14,11 +14,19 @@
 module E : sig
   type OpamStd.Config.E.t +=
     | CURL of string option
-    | FETCH of string option
+    | FETCH of string list option
     | NOCHECKSUMS of bool option
+    | REPOSITORYTARRING of bool option
     | REQUIRECHECKSUMS of bool option
     | RETRIES of int option
     | VALIDATIONHOOK of string option
+
+  val curl: unit -> string option
+  val fetch: unit -> string list option
+
+ (* Non lazy access *)
+  val curl_t: unit -> string option
+  val fetch_t: unit -> string list option
 end
 
 (** Toggles parsing of the tool's output to detect errors
@@ -30,6 +38,7 @@ type t = {
   validation_hook: OpamTypes.arg list option;
   retries: int;
   force_checksums: bool option;
+  repo_tarring : bool;
 }
 
 type 'a options_fun =
@@ -37,6 +46,7 @@ type 'a options_fun =
   ?validation_hook:OpamTypes.arg list option ->
   ?retries:int ->
   ?force_checksums:bool option ->
+  ?repo_tarring:bool ->
   'a
 
 include OpamStd.Config.Sig

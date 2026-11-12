@@ -10,27 +10,28 @@
 
 open OpamTypes
 
-let log = OpamConsole.log "REPO_BACKEND"
+let log ?level fmt = OpamConsole.log "REPO_BACKEND" ?level fmt
 let slog = OpamConsole.slog
 
 type update =
-  | Update_full of dirname
-  | Update_patch of filename
+  | Update_full of OpamRepositoryRoot.t
+  | Update_patch of (filename * Patch.t list)
   | Update_empty
   | Update_err of exn
 
 module type S = sig
   val name: OpamUrl.backend
   val pull_url:
-    ?cache_dir:dirname -> ?subpath:string -> dirname -> OpamHash.t option -> url ->
+    ?full_fetch:bool ->
+    ?cache_dir:dirname -> ?subpath:subpath -> dirname -> OpamHash.t option -> url ->
     filename option download OpamProcess.job
   val fetch_repo_update:
-    repository_name -> ?cache_dir:dirname -> dirname -> url ->
+    repository_name -> ?cache_dir:dirname -> OpamRepositoryRoot.t -> url ->
     update OpamProcess.job
-  val repo_update_complete: dirname -> url -> unit OpamProcess.job
-  val revision: dirname -> version option OpamProcess.job
+  val repo_update_complete: OpamRepositoryRoot.t -> url -> unit OpamProcess.job
+  val revision: dirname -> string option OpamProcess.job
   val sync_dirty:
-    ?subpath:string -> dirname -> url -> filename option download OpamProcess.job
+    ?subpath:subpath -> dirname -> url -> filename option download OpamProcess.job
   val get_remote_url:
     ?hash:string -> dirname ->
     url option OpamProcess.job
@@ -64,33 +65,137 @@ let check_digest filename = function
        false)
   | _ -> true
 
-open OpamProcess.Job.Op
-
 let job_text name label =
   OpamProcess.Job.with_text
     (Printf.sprintf "[%s: %s]"
        (OpamConsole.colorise `green (OpamRepositoryName.to_string name))
        label)
 
-let get_diff parent_dir dir1 dir2 =
-  log "diff: %a/{%a,%a}"
-    (slog OpamFilename.Dir.to_string) parent_dir
-    (slog OpamFilename.Base.to_string) dir1
-    (slog OpamFilename.Base.to_string) dir2;
-  let patch = OpamSystem.temp_file ~auto_clean: false "patch" in
-  let patch_file = OpamFilename.of_string patch in
-  let finalise () = OpamFilename.remove patch_file in
-  OpamProcess.Job.catch (fun e -> finalise (); raise e) @@ fun () ->
-  OpamSystem.make_command
-    ~verbose:OpamCoreConfig.(!r.verbose_level >= 2)
-    ~dir:(OpamFilename.Dir.to_string parent_dir) ~stdout:patch
-    "diff"
-    [ "-ruaN";
-      OpamFilename.Base.to_string dir1;
-      OpamFilename.Base.to_string dir2; ]
-  @@> function
-  | { OpamProcess.r_code = 0; _ } -> finalise(); Done None
-  | { OpamProcess.r_code = 1; _ } as r ->
-    OpamProcess.cleanup ~force:true r;
-    Done (Some patch_file)
-  | r -> OpamSystem.process_error r
+(**  DIFF *)
+
+(* We put back the prefix for patch -p1 harmonisation *)
+let add_prefix repo1 repo2 =
+  let prefix repo =
+    OpamRepositoryRoot.basename repo
+    |> OpamFilename.Base.to_string
+  in
+  let p1 x = prefix repo1 ^ "/" ^ x in
+  let p2 x = prefix repo2 ^ "/" ^ x in
+  fun patch ->
+    let operation =
+      match patch.Patch.operation with
+      | Patch.Create f -> Patch.Create (p2 f)
+      | Patch.Delete f -> Patch.Delete (p1 f)
+      | Patch.Edit (f1, f2) -> Patch.Edit (p1 f1, p2 f2)
+      | Patch.Git_ext (f1, f2, ext) -> Patch.Git_ext (p1 f1, p2 f2, ext)
+    in
+    {patch with operation}
+
+let get_diff repo1 repo2 =
+  let chrono = OpamConsole.timer () in
+  log "diff: %a"
+    (fun fmt () ->
+       if OpamFilename.Dir.equal
+           (OpamRepositoryRoot.dirname repo1)
+           (OpamRepositoryRoot.dirname repo2) then
+         Format.fprintf fmt "%s/{%s,%s}"
+           (OpamFilename.Dir.to_string (OpamRepositoryRoot.dirname repo1))
+           (OpamFilename.Base.to_string (OpamRepositoryRoot.basename repo1))
+           (OpamFilename.Base.to_string (OpamRepositoryRoot.basename repo2))
+       else
+         Format.fprintf fmt "%s %s vs %s %s"
+           (OpamRepositoryRoot.string_of_backend repo1)
+           (OpamRepositoryRoot.to_string repo1)
+           (OpamRepositoryRoot.string_of_backend repo2)
+           (OpamRepositoryRoot.to_string repo2))
+    ();
+  let get_contents =
+    let get_tgz_contents tgz =
+      OpamRepositoryRoot.Tgz.fold (fun acc filename content ->
+          OpamStd.String.Map.add
+            (OpamFilename.Unix.to_string filename) content acc)
+        OpamStd.String.Map.empty tgz
+    in
+    let read_dir_contents dir =
+      let fail s = failwith (s ^ " are unsupported") in
+      (* Recursively read directory contents into a string map.
+         Returns a map from relative file paths to their contents. *)
+      let rec aux acc prefix current_dir =
+        let entries = OpamSystem.get_files_except_vcs current_dir in
+        List.fold_left (fun acc entry ->
+            let full_path = Filename.concat current_dir entry in
+            let relative_path =
+              match prefix with
+              | None -> entry
+              | Some prefix -> prefix ^ "/" ^ entry
+            in
+            let stat = Unix.lstat full_path in
+            match stat.Unix.st_kind with
+            | Unix.S_REG ->
+              let content = OpamSystem.read full_path in
+              OpamStd.String.Map.add relative_path content acc
+            | Unix.S_DIR ->
+              aux acc (Some relative_path) full_path
+            | Unix.S_LNK -> fail "Symlinks"
+            | Unix.S_CHR -> fail "Character devices"
+            | Unix.S_BLK -> fail "Block devices"
+            | Unix.S_FIFO -> fail "Named pipes"
+            | Unix.S_SOCK -> fail "Sockets")
+          acc entries
+      in
+      aux OpamStd.String.Map.empty None dir
+    in
+    function
+    | OpamRepositoryRoot.Dir dir ->
+      read_dir_contents (OpamRepositoryRoot.Dir.to_string dir)
+    | OpamRepositoryRoot.Tgz tgz ->
+      get_tgz_contents tgz
+  in
+  let contents1 = get_contents repo1 in
+  let contents2 = get_contents repo2 in
+  let get_content_diffs filename contents1 content2 diffs seen =
+    (* Compute content diffs for a single file.
+       Compares [content2] (new) against [contents1] (old state map).
+       Adds [filename] to [seen] set and generates a diff if contents differ.
+       Returns updated (diffs, seen) accumulator pair *)
+    let seen = OpamStd.String.Set.add filename seen in
+    match OpamStd.String.Map.find_opt filename contents1 with
+    | Some content1 when String.equal content1 content2 ->
+      (diffs, seen)
+    | content1_opt ->
+      let content1 = Option.map (fun c -> (filename, c)) content1_opt in
+      let content2 = Some (filename, content2) in
+      match Patch.diff content1 content2 with
+      | None -> (diffs, seen)
+      | Some diff -> (diff :: diffs, seen)
+  in
+  let diffs, seen =
+    OpamStd.String.Map.fold
+      (fun filename content2 (diffs, seen) ->
+         get_content_diffs filename contents1 content2 diffs seen)
+      contents2 ([], OpamStd.String.Set.empty)
+  in
+  let diffs =
+    (* NOTE: putting the deletions first in the list allows us to have
+       a simpler implementation of OpamPatch. This might not be needed
+       in the future if OpamPatch supports git apply style reordering. *)
+    OpamStd.String.Map.fold (fun filename content diffs ->
+        if OpamStd.String.Set.mem filename seen then diffs
+        else
+          match Patch.diff (Some (filename, content)) None with
+          | None -> diffs
+          | Some diff -> diff :: diffs)
+      contents1 diffs
+  in
+  match diffs with
+  | [] ->
+    log "Internal diff (empty) done in %.2fs." (chrono ());
+    None
+  | diffs ->
+    log "Internal diff (non-empty, %a changed files) done in %.2fs."
+      (slog (fun l -> string_of_int (List.length l))) diffs (chrono ());
+    let patch = OpamSystem.temp_file ~auto_clean:false "patch" in
+    let patch_file = OpamFilename.of_string patch in
+    let file_diffs = List.map (add_prefix repo1 repo2) diffs in
+    OpamFilename.write patch_file (Format.asprintf "%a" Patch.pp_list file_diffs);
+    Some (patch_file, diffs)

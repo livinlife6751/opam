@@ -17,14 +17,14 @@
 open OpamParserTypes.FullPos
 open OpamTypes
 
-include module type of struct include OpamCompat end
-
 val string_of_std_path: std_path -> string
 val std_path_of_string: string -> std_path
 val all_std_paths: std_path list
 
+val action_equal : ('a -> 'a -> bool) -> 'a action -> 'a action -> bool
+
 (** Extract a package from a package action. *)
-val action_contents: [< 'a action ] -> 'a
+val action_contents: [< 'a action ] -> 'a list
 
 val map_atomic_action: ('a -> 'b) -> 'a atomic_action -> 'b atomic_action
 val map_highlevel_action: ('a -> 'b) -> 'a highlevel_action -> 'b highlevel_action
@@ -44,6 +44,8 @@ val string_of_shell: shell -> string
 (** The empty file position *)
 val pos_null: pos
 val nullify_pos : 'a -> 'a with_pos
+val nullify_pos_map : ('a -> 'b) -> 'a with_pos -> 'b with_pos
+val nullify_pos_value : value -> value
 
 (** [pos_best pos1 pos2] returns the most detailed position between [pos1] and
     [pos2] (defaulting to [pos1]) *)
@@ -61,13 +63,27 @@ val string_of_user_action: user_action -> string
     preserve order *)
 val env_array: env -> string array
 
-(** Parses the data suitable for a filter.FIdent from a string. May raise
-    [Failure msg] on bad package names. A self-reference [_] parses to [None] *)
+exception Parse_variable of string * string
+
+(** Parses the data suitable for a filter.FIdent from a string. A
+    self-reference [_] parses to [None].
+    @raise Failure on bad package names.*)
 val filter_ident_of_string:
   string -> name option list * variable * (string * string) option
 
+(** Like {!filter_ident_of_string} but parses also [%{?pkg+:var:}%] syntax for
+    variables with package name that contains a [+].
+
+    @raise {!Parse_variable} [(pkg,var)] if [accept] is [false] when several
+    [+] are encountered in package name, i.e. [pkg++:var]. *)
+val filter_ident_of_string_interp:
+  ?accept:bool -> string
+  -> name option list * variable * (string * string) option
+
 val string_of_filter_ident:
   name option list * variable * (string * string) option -> string
+
+val pkg_flag_equal: package_flag -> package_flag -> bool
 
 val pkg_flag_of_string: string -> package_flag
 
@@ -76,5 +92,40 @@ val string_of_pkg_flag: package_flag -> string
 val all_package_flags: package_flag list
 
 (** Map on a solver result *)
-val map_success: ('a -> 'b) -> ('a,'fail) result -> ('b,'fail) result
-val iter_success: ('a -> unit) -> ('a, 'b) result -> unit
+val map_success:
+  ('a -> 'b) -> ('a,'fail) solver_result -> ('b,'fail) solver_result
+val iter_success: ('a -> unit) -> ('a, 'b) solver_result -> unit
+
+(** Environment update helpers *)
+(* Build an environment update *)
+val env_update:
+  ?comment:string -> rewrite:'a separator_path_format option
+  -> string -> 'b env_update_op_kind -> string
+  -> ('a, 'b) env_update
+
+val env_update_resolved:
+  ?comment:string -> ?rewrite:spf_resolved separator_path_format option
+  -> string -> 'a env_update_op_kind -> string
+  -> (spf_resolved, 'a) env_update
+
+val env_update_unresolved:
+  ?comment:string -> ?rewrite:spf_unresolved separator_path_format option
+  -> string -> 'a env_update_op_kind -> string
+  -> (spf_unresolved, 'a) env_update
+
+val op_of_raw: OpamParserTypes.FullPos.env_update_op_kind -> euok_writeable env_update_op_kind
+val raw_of_op: euok_writeable env_update_op_kind -> OpamParserTypes.FullPos.env_update_op_kind
+
+(* Path transformers & separator functions *)
+val string_of_path_format: path_format -> string
+val char_of_separator: separator -> char
+
+(** Comparators **)
+(* Switch selections *)
+val switch_selections_compare : switch_selections -> switch_selections -> int
+val switch_selections_equal : switch_selections -> switch_selections -> bool
+
+val simple_arg_equal : simple_arg -> simple_arg -> bool
+val arg_equal : arg -> arg -> bool
+val filter_equal : filter -> filter -> bool
+val command_equal : command -> command -> bool
